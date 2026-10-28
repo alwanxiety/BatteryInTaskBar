@@ -37,11 +37,8 @@ namespace {
 constexpr DWORD kScanWindowMs = 5000;
 constexpr DWORD kScanPeriodMs = 30000;
 // Запасной вариант, если Windows не отдаёт состояние подключения: реклама
-// должна идти не реже раза в минуту.
-constexpr std::uint64_t kAdvertFallbackMs = 60000;
-// Устройство числится подключённым, но рекламы нет уже две минуты — считаем
-// связь устаревшей и убираем плитку, чтобы она не висела вечно.
-constexpr std::uint64_t kStaleLinkMs = 120000;
+// должна идти не реже полутора минут. Это старая стабильная схема без мигания.
+constexpr std::uint64_t kAdvertFallbackMs = 90000;
 // Ограничение на карту адресов: в отчёте не нужен весь эфир.
 constexpr std::size_t kMaxAdvertRecords = 48;
 
@@ -290,7 +287,6 @@ struct AirPodsMonitor::Impl {
     bool btWatcherReady{ false };
     bool btWatcherFailed{ false };
     bool deviceConnected{ false };
-    bool everSeenWhileConnected{ false };
 
     bool scanning{ false };
     int scanCount{ 0 };
@@ -311,16 +307,10 @@ struct AirPodsMonitor::Impl {
                         const std::wstring name = info.Name().c_str();
                         if (!LooksLikeHeadsetName(name)) return;
                         const std::wstring id = info.Id().c_str();
-                        const std::uint64_t now = NowUnixMs();
                         {
                             std::lock_guard lock(mutex);
                             connectedBtDevices[id] = name;
                             deviceConnected = true;
-                            // Если реклама только что была, плитку можно показать
-                            // сразу, не дожидаясь следующего окна скана.
-                            everSeenWhileConnected =
-                                lastAdvertUnixMs != 0 && now >= lastAdvertUnixMs &&
-                                (now - lastAdvertUnixMs) <= 3000;
                         }
                         Diag::Log(L"airpods: headset connected (%ls)", name.c_str());
                         AppState::Instance().RequestAirPodsScan();
@@ -343,7 +333,6 @@ struct AirPodsMonitor::Impl {
                             }
                             if (connectedBtDevices.empty() && deviceConnected) {
                                 deviceConnected = false;
-                                everSeenWhileConnected = false;
                                 disconnected = true;
                             }
                         }
@@ -424,19 +413,12 @@ struct AirPodsMonitor::Impl {
             telemetry.hasData = lastSuccessUnixMs != 0;
 
             if (btWatcherReady) {
-                // Пока Windows считает устройство подключённым, плитка живёт
-                // даже если реклама временно замолчала — это и убирает мигание.
-                // Показать её можно только после хотя бы одной рекламы/чтения,
-                // чтобы «висящая» связь без данных не рисовала старый заряд.
-                if (deviceConnected && everSeenWhileConnected) {
-                    const bool stale = lastAdvertUnixMs == 0 || now < lastAdvertUnixMs ||
-                                       (now - lastAdvertUnixMs) > kStaleLinkMs;
-                    telemetry.connected = !stale;
-                } else {
-                    telemetry.connected = false;
-                }
+                // Видимость определяется только реальным состоянием
+                // Bluetooth-подключения. Реклама обновляет заряд, но не может
+                // ни спрятать, ни показать плитку — поэтому нет мерцания.
+                telemetry.connected = deviceConnected;
             } else {
-                // Вотчер не поднялся — запасной путь по рекламе.
+                // Вотчер не поднялся — старая стабильная схема по рекламе.
                 telemetry.connected =
                     (lastAdvertUnixMs != 0 && now >= lastAdvertUnixMs &&
                      (now - lastAdvertUnixMs) <= kAdvertFallbackMs) ||
@@ -526,7 +508,6 @@ struct AirPodsMonitor::Impl {
                           deviceName.c_str(), left, right, casePercent);
             }
             lastSuccessUnixMs = now;
-            everSeenWhileConnected = true;
         }
     }
 
@@ -557,7 +538,6 @@ struct AirPodsMonitor::Impl {
         lastGattOkMs = now;
         // GATT-ответ — тоже доказательство, что устройство на связи.
         lastAdvertUnixMs = now;
-        everSeenWhileConnected = true;
     }
 
     /// Список сопряжённых BLE-устройств. Нужен, когда AirPods молчат в эфире:
@@ -908,9 +888,17 @@ struct AirPodsMonitor::Impl {
                 continue;
             }
 
-            if (!AppState::Instance().IsAirPodsEnabled() ||
-                AppState::Instance().IsFullscreenAppActive()) {
+            if (!AppState::Instance().IsAirPodsEnabled()) {
+                // Плитку скрыли вручную — опрос и состояние сбрасываем.
                 PublishDisconnected();
+                WaitForSingleObject(stopEvent, 500);
+                continue;
+            }
+
+            if (AppState::Instance().IsFullscreenAppActive()) {
+                // В полноэкранном приложении только не обновляем данные.
+                // Состояние подключения и последние показания сохраняем, чтобы
+                // после выхода плитка вернулась сразу, как у мыши.
                 WaitForSingleObject(stopEvent, 500);
                 continue;
             }
@@ -1042,10 +1030,9 @@ void AirPodsMonitor::AppendDiagnostics(std::wstring& out) const {
                AgeText(telemetry.lastSuccessUnixMs).c_str());
     out += buffer;
 
-    swprintf_s(buffer, L"  bt watcher: %ls, device connected: %ls, seen while connected: %ls\r\n",
+    swprintf_s(buffer, L"  bt watcher: %ls, device connected: %ls\r\n",
                m_impl->btWatcherReady ? L"ready" : (m_impl->btWatcherFailed ? L"failed" : L"starting"),
-               m_impl->deviceConnected ? L"yes" : L"no",
-               m_impl->everSeenWhileConnected ? L"yes" : L"no");
+               m_impl->deviceConnected ? L"yes" : L"no");
     out += buffer;
     for (const auto& [id, name] : m_impl->connectedBtDevices) {
         out += L"    connected: " + name + L"  id=" + id + L"\r\n";

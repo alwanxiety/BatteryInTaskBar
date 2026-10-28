@@ -645,9 +645,10 @@ bool WidgetWindow::ShouldShowHeadsetTile() const {
     if (m_headsetUserHidden) return false;
     if (!m_headset.Hwnd()) return false;  // окно не создалось — нечего показывать
     const AirPodsTelemetry pods = AppState::Instance().GetAirPods();
-    // Только живые данные: отключились — плитка исчезает, а не показывает
-    // заряд часовой давности как текущий.
-    if (!pods.connected || !pods.hasData || !pods.HasAnyLevel()) return false;
+    // Плитка живёт, пока Windows считает наушники подключёнными. Данные о
+    // заряде могут прийти на секунду позже — тогда на плите будет «…»,
+    // но сама плитка не появляется с задержкой.
+    if (!pods.connected) return false;
     // После «Скрыть виджет» показываем только заряд, полученный заново:
     // старые показания не должны выглядеть как подключение.
     if (m_headsetHiddenSinceUnixMs != 0 && pods.lastSuccessUnixMs <= m_headsetHiddenSinceUnixMs) {
