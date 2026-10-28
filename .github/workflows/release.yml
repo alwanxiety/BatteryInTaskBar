@@ -1,0 +1,159 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Toolchain
+        shell: pwsh
+        run: |
+          cmake --version
+          where.exe cl
+          where.exe rc
+
+      - name: Check tag matches version
+        shell: pwsh
+        run: |
+          $header = Get-Content res/app_version.h -Raw
+          if ($header -notmatch 'APP_VERSION_STRING "([^"]+)"') {
+            throw "APP_VERSION_STRING not found in res/app_version.h"
+          }
+          $version = "v$($Matches[1])"
+          if ($version -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match version $version"
+          }
+
+      - name: Check SignPath configuration
+        id: signpath
+        shell: pwsh
+        env:
+          TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TOKEN)) {
+            "configured=false" >> $env:GITHUB_OUTPUT
+            Write-Output "::notice::SIGNPATH_API_TOKEN is not set; skipping SignPath signing and release publication."
+          } else {
+            "configured=true" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $output = cmake -S . -B build -A x64 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath configure.log
+          if ($code -ne 0) {
+            "### Configure failed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            Get-Content configure.log | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            Get-Content configure.log | Select-Object -Last 8 | ForEach-Object { Write-Output "::error title=CMake configure::$_" }
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit $code
+          }
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package unsigned artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path build/Release/taskbar_mod.dll, build/Release/injector.exe `
+            -DestinationPath "dist/BatteryInTaskBar-${{ github.ref_name }}-unsigned.zip" -Force
+
+      - name: Upload unsigned artifact
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-${{ github.ref_name }}
+          path: dist/BatteryInTaskBar-${{ github.ref_name }}-unsigned.zip
+          archive: false
+
+      - name: Sign with SignPath
+        if: steps.signpath.outputs.configured == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+          skip-decompress: true
+
+      - name: Extract signed artifact
+        if: steps.signpath.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          Get-ChildItem signed -Recurse -Filter *.zip -ErrorAction SilentlyContinue | ForEach-Object {
+            Expand-Archive -Path $_.FullName -DestinationPath signed -Force
+          }
+          $dll = Get-ChildItem signed -Recurse -Filter taskbar_mod.dll | Select-Object -First 1
+          $exe = Get-ChildItem signed -Recurse -Filter injector.exe | Select-Object -First 1
+          if (-not $dll -or -not $exe) {
+            throw "Signed binaries were not found in the artifact"
+          }
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item $dll.FullName release/taskbar_mod.dll -Force
+          Copy-Item $exe.FullName release/injector.exe -Force
+
+      - name: Verify signatures
+        if: steps.signpath.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem release -File | Where-Object { $_.Extension -in '.dll', '.exe' }
+          if ($files.Count -ne 2) {
+            throw "Expected two signed files, found $($files.Count)"
+          }
+          foreach ($file in $files) {
+            $sig = Get-AuthenticodeSignature $file.FullName
+            if ($sig.Status -ne 'Valid') {
+              throw "Invalid signature: $($file.Name) ($($sig.Status))"
+            }
+            Write-Host "$($file.Name): $($sig.SignerCertificate.Subject)"
+          }
+
+      - name: Package release
+        if: steps.signpath.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path release/taskbar_mod.dll, release/injector.exe `
+            -DestinationPath "release/BatteryInTaskBar-${{ github.ref_name }}.zip" -Force
+          Get-FileHash release/* -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content release/SHA256SUMS.txt -Encoding ASCII
+
+      - name: Publish GitHub release
+        if: steps.signpath.outputs.configured == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          append_body: |
+            The binaries in this release are code-signed via SignPath Foundation.
+            SmartScreen may still show a warning for a new release until it builds
+            reputation; use "More info -> Run anyway" if you trust the source.
+          files: |
+            release/taskbar_mod.dll
+            release/injector.exe
+            release/BatteryInTaskBar-${{ github.ref_name }}.zip
+            release/SHA256SUMS.txt
+

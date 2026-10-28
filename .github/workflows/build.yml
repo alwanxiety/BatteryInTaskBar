@@ -1,0 +1,60 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Toolchain
+        shell: pwsh
+        run: |
+          cmake --version
+          where.exe cl
+          where.exe rc
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $output = cmake -S . -B build -A x64 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath configure.log
+          if ($code -ne 0) {
+            "### Configure failed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            Get-Content configure.log | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            Get-Content configure.log | Select-Object -Last 8 | ForEach-Object { Write-Output "::error title=CMake configure::$_" }
+            '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit $code
+          }
+
+      - name: Upload configure log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: configure-log
+          path: configure.log
+          if-no-files-found: ignore
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload unsigned binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: BatteryInTaskBar-unsigned
+          path: |
+            build/Release/taskbar_mod.dll
+            build/Release/injector.exe
+
