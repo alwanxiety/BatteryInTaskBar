@@ -119,10 +119,9 @@ std::wstring ResolveDllPath() {
 
 // --- Повторный запуск уже загруженной DLL ---
 // Если виджет закрыли, а ссылка на DLL в Explorer осталась, обычный LoadLibrary
-// не вызовет DllMain, и виджет молча не появится. Запускать код по вычисленному
-// адресу экспорта нельзя: такой вызов может зависнуть на loader lock и
-// заморозить оболочку. Поэтому честно сообщаем об ошибке и просим перезапустить
-// Explorer.
+// не вызовет DllMain, и виджет молча не появится. Запускать код по адресу
+// экспорта нельзя: такой вызов может зависнуть на loader lock и заморозить
+// оболочку. Поэтому сообщаем об ошибке и просим перезапустить Explorer.
 
 std::uintptr_t FindRemoteModule(DWORD pid, const wchar_t* moduleName) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -139,47 +138,6 @@ std::uintptr_t FindRemoteModule(DWORD pid, const wchar_t* moduleName) {
     }
     CloseHandle(snapshot);
     return base;
-}
-
-/// Время сборки файла (PE TimeDateStamp) — должно совпасть с загруженной DLL,
-/// иначе мы разбудим старую версию вместо новой.
-bool LocalImageStamp(const std::wstring& path, DWORD& timeStamp) {
-    HMODULE module = LoadLibraryExW(path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
-    if (!module) return false;
-    bool ok = false;
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
-    if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
-            reinterpret_cast<const BYTE*>(module) + dos->e_lfanew);
-        if (nt->Signature == IMAGE_NT_SIGNATURE) {
-            timeStamp = nt->FileHeader.TimeDateStamp;
-            ok = true;
-        }
-    }
-    FreeLibrary(module);
-    return ok;
-}
-
-/// Разбудить уже загруженную DLL: она ждёт на событии с меткой своей сборки и
-/// запускает виджет заново. Если на диске другая версия, события не существует —
-/// тогда нужен перезапуск Explorer.
-bool SignalRestart(const std::wstring& dllPath) {
-    DWORD stamp = 0;
-    if (!LocalImageStamp(dllPath, stamp)) return false;
-
-    wchar_t name[64]{};
-    swprintf_s(name, L"Local\\BatteryInTaskBar.Restart.%08lX", static_cast<unsigned long>(stamp));
-    HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, name);
-    if (!event) return false;
-    SetEvent(event);
-    CloseHandle(event);
-
-    // Ждём, пока DLL создаст мьютекс экземпляра (виджет стартует).
-    for (int attempt = 0; attempt < 50; ++attempt) {
-        Sleep(100);
-        if (IsWidgetRunning()) return true;
-    }
-    return false;
 }
 
 bool TryInjectOnce(const std::wstring& dllPath) {
@@ -199,11 +157,10 @@ bool TryInjectOnce(const std::wstring& dllPath) {
     // виджет через экспорт, иначе LoadLibrary не вызовет DllMain.
     const std::uintptr_t loadedBase = FindRemoteModule(pid, L"taskbar_mod.dll");
     if (loadedBase != 0) {
-        // DLL уже в процессе (виджет закрыли, но ссылка осталась): будим её
-        // через событие. LoadLibrary в этом случае DllMain не вызовет.
-        const bool started = SignalRestart(dllPath);
+        // Модуль уже загружен, но виджет не работает. Повторный LoadLibrary
+        // не вызовет DllMain, а запускать код по адресу экспорта опасно.
         CloseHandle(hProc);
-        return started;
+        return false;
     }
 
     const bool injected = InjectDll(hProc, dllPath);

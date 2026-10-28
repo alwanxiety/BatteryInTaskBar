@@ -67,29 +67,6 @@ D2D1_COLOR_F MakeColor(float r, float g, float b, float a = 1.0f) {
     return D2D1::ColorF(r, g, b, a);
 }
 
-// Фабрики D2D/DWrite создаём один раз на загрузку DLL: они потокобезопасны в
-// режиме SINGLE_THREADED только для одного потока, а все меню живут на UI-потоке
-// виджета. Раньше каждая менюшка создавала свои — это лишние объекты и время
-// на каждое открытие.
-ID2D1Factory* SharedD2DFactory() {
-    static ComPtr<ID2D1Factory> factory = [] {
-        ComPtr<ID2D1Factory> created;
-        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, created.GetAddressOf());
-        return created;
-    }();
-    return factory.Get();
-}
-
-IDWriteFactory* SharedDWriteFactory() {
-    static ComPtr<IDWriteFactory> factory = [] {
-        ComPtr<IDWriteFactory> created;
-        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                            reinterpret_cast<IUnknown**>(created.GetAddressOf()));
-        return created;
-    }();
-    return factory.Get();
-}
-
 }  // namespace
 
 class Win11Menu {
@@ -227,14 +204,14 @@ Win11Menu::~Win11Menu() {
 }
 
 bool Win11Menu::Init() {
-    m_d2dFactory = SharedD2DFactory();
-    m_dwrite = SharedDWriteFactory();
-    if (!m_d2dFactory || !m_dwrite) return false;
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m_d2dFactory.GetAddressOf()))) return false;
     const D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
         D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
         D2D1_LINE_JOIN_ROUND, 0.0f, D2D1_DASH_STYLE_SOLID, 0.0f);
     if (FAILED(m_d2dFactory->CreateStrokeStyle(strokeProps, nullptr, 0,
                                                m_roundStroke.GetAddressOf()))) return false;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(m_dwrite.GetAddressOf())))) return false;
     if (!CreateTextFormats()) return false;
     BuildLayout();
     if (!CreateMenuWindow()) return false;
