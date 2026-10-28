@@ -21,6 +21,11 @@ void Set(bool requested) noexcept;
 [[nodiscard]] bool Requested() noexcept;
 }
 
+/// «USB Receiver» и родственные имена — это не модель мыши. Общий помощник:
+/// используется при выборе PnP-устройства, чтении HID++ имени и восстановлении
+/// кэша, чтобы ресивер не подменял название мыши на плитке.
+[[nodiscard]] bool LooksLikeReceiverName(const std::wstring& name);
+
 class IMouseProvider {
 public:
     virtual ~IMouseProvider() = default;

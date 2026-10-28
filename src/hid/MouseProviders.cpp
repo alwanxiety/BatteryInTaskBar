@@ -201,6 +201,18 @@ bool PollAbort::Requested() noexcept {
     return g_pollAbort.load(std::memory_order_relaxed);
 }
 
+bool LooksLikeReceiverName(const std::wstring& name) {
+    if (name.empty()) return false;
+    const std::wstring lower = ToLowerCopy(name);
+    static constexpr const wchar_t* kHints[] = {
+        L"receiver", L"приемник", L"приёмник", L"dongle", L"донгл"
+    };
+    for (const wchar_t* hint : kHints) {
+        if (lower.find(hint) != std::wstring::npos) return true;
+    }
+    return false;
+}
+
 // --- LogitechProvider ---
 bool LogitechProvider::Match(uint16_t vid, uint16_t) const noexcept { return vid == 0x046D; }
 bool LogitechProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) {
@@ -210,10 +222,18 @@ bool LogitechProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry
     if (!HidD_GetAttributes(hDev, &attr)) return false;
 
     // Сначала индексы, которые уже отвечали: у спящей мыши это единственная
-    // попытка вместо полного перебора шести индексов и 0xFF.
+    // попытка вместо полного перебора шести индексов и 0xFF. Порядок — по
+    // возрастанию, как раньше: мышь (1..6) важнее служебного 0xFF, иначе
+    // плитка могла показать имя ресивера вместо модели мыши.
+    std::vector<uint8_t> cachedIndices;
+    cachedIndices.reserve(m_cache.size());
     for (const BatteryCache& cached : m_cache) {
         if (cached.pid != attr.ProductID || cached.type == BatteryCache::BatteryType::None) continue;
-        if (QueryCachedOrDiscover(hDev, sizes, attr.ProductID, cached.deviceIndex, outData)) return true;
+        cachedIndices.push_back(cached.deviceIndex);
+    }
+    std::sort(cachedIndices.begin(), cachedIndices.end());
+    for (const uint8_t index : cachedIndices) {
+        if (QueryCachedOrDiscover(hDev, sizes, attr.ProductID, index, outData)) return true;
         if (PollAbort::Requested()) return false;
     }
     const auto alreadyTried = [this, pid = attr.ProductID](uint8_t index) {
@@ -269,7 +289,12 @@ bool LogitechProvider::QueryCachedOrDiscover(HANDLE hDev, const ReportSizes& siz
             cache->retryDiscoveryTick = GetTickCount64() + 15000;
             return false;
         }
-        cache->nameIndex = GetFeatureIndex(hDev, sizes, devIdx, 0x0005); if (cache->nameIndex) cache->name = QueryDeviceNameWithIndex(hDev, sizes, devIdx, cache->nameIndex);
+        cache->nameIndex = GetFeatureIndex(hDev, sizes, devIdx, 0x0005);
+        if (cache->nameIndex) {
+            cache->name = QueryDeviceNameWithIndex(hDev, sizes, devIdx, cache->nameIndex);
+            // HID++ иногда отдаёт имя самого ресивера, а не мыши.
+            if (LooksLikeReceiverName(cache->name)) cache->name.clear();
+        }
     }
     std::array<uint8_t, 20> resp{};
     switch (cache->type) {
@@ -660,9 +685,6 @@ bool PnpBatteryProvider::Query(DeviceTelemetry& outData) {
             } else if (type == DEVPROP_TYPE_INT32 && needed >= 4) {
                 level = *reinterpret_cast<const LONG*>(raw.data());
             }
-            // Ноль — валидное значение (полностью разряжено): свойство батареи
-            // есть только у устройств с батареей, «нет данных» выглядит как
-            // отсутствие свойства, а не как 0.
             if (level < 0 || level > 100) continue;
 
             wchar_t friendly[256]{};
@@ -673,8 +695,14 @@ bool PnpBatteryProvider::Query(DeviceTelemetry& outData) {
                 name = friendly;
             }
             if (LooksLikeAudioDevice(name) || LooksLikeNonMouse(name)) continue;
+            // Имя ресивера не должно попадать на плитку как модель мыши.
+            if (LooksLikeReceiverName(name)) name.clear();
 
             const int score = MouseNameScore(name);
+            // Ноль у ресивера или безымянного устройства — это «нет данных», а
+            // не разряженная мышь: иначе плитка переключается на «USB Receiver».
+            // Настоящий 0 % принимаем только у устройства, явно похожего на мышь.
+            if (level == 0 && score < 3) continue;
             if (score <= bestScore) continue;
 
             bestScore = score;

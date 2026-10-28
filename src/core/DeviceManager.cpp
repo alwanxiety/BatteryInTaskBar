@@ -249,8 +249,11 @@ bool DeviceManager::QueryCandidate(const Candidate& candidate, DeviceTelemetry& 
     } else if (QueryProviderSafe(*candidate.provider, hDevice, caps, outTelemetry)) {
         if (HasPlaceholderName(outTelemetry.deviceName)) {
             std::array<WCHAR, 128> productString{};
-            if (HidD_GetProductString(hDevice, productString.data(), static_cast<ULONG>(productString.size() * sizeof(WCHAR))))
-                outTelemetry.deviceName = productString.data();
+            if (HidD_GetProductString(hDevice, productString.data(),
+                                      static_cast<ULONG>(productString.size() * sizeof(WCHAR)))) {
+                const std::wstring product = productString.data();
+                if (!LooksLikeReceiverName(product)) outTelemetry.deviceName = product;
+            }
         }
         success = true;
         failure = PollAttempt::Failure::None;

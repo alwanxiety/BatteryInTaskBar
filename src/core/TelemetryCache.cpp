@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include "core/AppState.h"
+#include "hid/MouseProviders.h"
 
 namespace {
 
@@ -82,6 +83,9 @@ void TelemetryCache::Restore() {
         mouseSuccess != 0 && now >= mouseSuccess && (now - mouseSuccess) <= kMaxAgeMs) {
         DeviceTelemetry telemetry;
         telemetry.deviceName = ReadString(key, L"MouseName");
+        // В старых версиях в кэш могло попасть имя ресивера — на плитке это
+        // выглядело как «USB Receiver» вместо мыши.
+        if (LooksLikeReceiverName(telemetry.deviceName)) telemetry.deviceName.clear();
         telemetry.batteryLevel = static_cast<int>(level);
         ReadDword(key, L"MouseCharging", charging);
         telemetry.isCharging = charging != 0;
