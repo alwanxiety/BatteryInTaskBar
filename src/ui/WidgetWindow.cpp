@@ -60,7 +60,11 @@ constexpr int kSnapDurationMs = 140;
 constexpr ULONGLONG kPulseWindowMs = 60 * 1000;
 
 enum ZBID : DWORD {
-    ZBID_IMMERSIVE_NOTIFICATION = 4
+    ZBID_IMMERSIVE_NOTIFICATION = 4,
+    // На Windows 11 XAML-острова оболочки (Task View, превью задач, календарь)
+    // живут в полосе 16. В полосе 4 акриловая поверхность оболочки может
+    // накрывать плитку при показе превью, поэтому используем ту же полосу.
+    ZBID_SHELL_XAML = 16
 };
 
 using pfnSetWindowBand = BOOL(WINAPI*)(HWND hWnd, HWND hwndInsertAfter, DWORD dwBand);
@@ -121,7 +125,12 @@ bool WidgetWindow::Create() {
 
     if (HMODULE hUser32 = GetModuleHandleW(L"user32.dll")) {
         if (auto pSetWindowBand = reinterpret_cast<pfnSetWindowBand>(GetProcAddress(hUser32, "SetWindowBand"))) {
-            pSetWindowBand(m_hwnd, nullptr, ZBID_IMMERSIVE_NOTIFICATION);
+            pSetWindowBand(m_hwnd, nullptr, ZBID_SHELL_XAML);
+        }
+        using pfnGetWindowBand = BOOL(WINAPI*)(HWND, DWORD*);
+        if (auto pGetWindowBand = reinterpret_cast<pfnGetWindowBand>(GetProcAddress(hUser32, "GetWindowBand"))) {
+            DWORD band = 0;
+            if (pGetWindowBand(m_hwnd, &band)) Diag::Log(L"widget: window band=%lu", band);
         }
     }
 

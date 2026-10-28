@@ -26,7 +26,10 @@ constexpr int kTransitionMs = 220;
 constexpr int kSlideOffset = 14;
 
 enum ZBID : DWORD {
-    ZBID_IMMERSIVE_NOTIFICATION = 4
+    ZBID_IMMERSIVE_NOTIFICATION = 4,
+    // Как у XAML-островов оболочки Windows 11: иначе акрил панели задач может
+    // накрыть плитку при показе превью.
+    ZBID_SHELL_XAML = 16
 };
 
 using pfnSetWindowBand = BOOL(WINAPI*)(HWND hWnd, HWND hwndInsertAfter, DWORD dwBand);
@@ -64,7 +67,7 @@ bool HeadsetTile::Create(HINSTANCE hInst) {
 
     if (HMODULE hUser32 = GetModuleHandleW(L"user32.dll")) {
         if (auto pSetWindowBand = reinterpret_cast<pfnSetWindowBand>(GetProcAddress(hUser32, "SetWindowBand"))) {
-            pSetWindowBand(m_hwnd, nullptr, ZBID_IMMERSIVE_NOTIFICATION);
+            pSetWindowBand(m_hwnd, nullptr, ZBID_SHELL_XAML);
         }
     }
     return true;

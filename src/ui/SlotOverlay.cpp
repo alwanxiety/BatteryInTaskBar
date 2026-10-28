@@ -90,6 +90,13 @@ bool SlotOverlay::EnsureWindow(int width, int height) {
                                  0, 0, width, height, nullptr, nullptr, m_hInst, this);
         if (!m_hwnd) return false;
         SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        // Подсветка ячеек должна быть над панелью задач и её XAML-островами.
+        if (HMODULE hUser32 = GetModuleHandleW(L"user32.dll")) {
+            using pfnSetWindowBand = BOOL(WINAPI*)(HWND, HWND, DWORD);
+            if (auto pSetWindowBand = reinterpret_cast<pfnSetWindowBand>(GetProcAddress(hUser32, "SetWindowBand"))) {
+                pSetWindowBand(m_hwnd, nullptr, 16);
+            }
+        }
     } else {
         SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, width, height,
                      SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
