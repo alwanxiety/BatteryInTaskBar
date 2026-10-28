@@ -148,9 +148,7 @@ jobs:
         with:
           generate_release_notes: true
           append_body: |
-            The binaries in this release are code-signed via SignPath Foundation.
-            SmartScreen may still show a warning for a new release until it builds
-            reputation; use "More info -> Run anyway" if you trust the source.
+            SmartScreen may warn when running the file — this is normal.
           files: |
             release/taskbar_mod.dll
             release/injector.exe
