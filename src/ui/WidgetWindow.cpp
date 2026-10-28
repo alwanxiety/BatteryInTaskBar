@@ -1021,14 +1021,22 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 m_headset.Relayout({}, 0, 0, false);
             } else if (!IsWindowVisible(hwnd)) {
                 Relayout();
-            } else if (m_layoutDirty) {
-                // Склеенные события оболочки: догоняем раскладку, когда поток
-                // событий утих, а не на каждом кадре анимации панели.
-                const ULONGLONG now = GetTickCount64();
-                if (now - m_lastLayoutTick >= 100) {
-                    m_layoutDirty = false;
-                    m_lastLayoutTick = now;
-                    Relayout();
+            } else {
+                // Оболочка может переставить свои окна выше виджета (например,
+                // когда показывает превью задачи). Панель задач непрозрачная, и
+                // плитка «пропадает», хотя IsWindowVisible остаётся true.
+                // Возвращаем topmost-порядок; окно при этом не активируется.
+                ForceRestore();
+                m_headset.ForceRestore();
+                if (m_layoutDirty) {
+                    // Склеенные события оболочки: догоняем раскладку, когда поток
+                    // событий утих, а не на каждом кадре анимации панели.
+                    const ULONGLONG now = GetTickCount64();
+                    if (now - m_lastLayoutTick >= 100) {
+                        m_layoutDirty = false;
+                        m_lastLayoutTick = now;
+                        Relayout();
+                    }
                 }
             }
             UpdateHeadsetState();
