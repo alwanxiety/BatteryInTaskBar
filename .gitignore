@@ -1,0 +1,29 @@
+# Build outputs
+cmake-build-*/
+build*/
+out/
+*.rar
+taskbar_log.txt
+
+# IDE
+.idea/
+.vs/
+*.user
+*.suo
+
+# Binaries and intermediate files
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# OS / logs
+Thumbs.db
+desktop.ini
+*.log
+
+
+dist/
