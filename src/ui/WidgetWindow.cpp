@@ -223,16 +223,41 @@ void WidgetWindow::ScheduleRelayout() {
     Relayout();
 }
 
+void WidgetWindow::SetFullscreenState(bool active) {
+    if (active != m_fullscreenState) {
+        m_fullscreenState = active;
+        if (active) LogForegroundWindow();
+    }
+    AppState::Instance().SetFullscreenAppActive(active);
+}
+
+void WidgetWindow::LogForegroundWindow() const {
+    HWND foreground = GetForegroundWindow();
+    if (!foreground) return;
+    std::array<WCHAR, 96> cls{};
+    GetClassNameW(foreground, cls.data(), static_cast<int>(cls.size()));
+    RECT rc{};
+    GetWindowRect(foreground, &rc);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(foreground, &pid);
+    Diag::Log(L"fullscreen: fg=%ls rect=%ld,%ld,%ld,%ld pid=%lu", cls.data(), rc.left, rc.top,
+              rc.right, rc.bottom, pid);
+}
+
 void WidgetWindow::Relayout() {
     if (!m_hwnd || !m_hTaskbarWnd || !IsWindow(m_hTaskbarWnd)) return;
 
     const bool fullscreen = IsFullscreenAppActive();
     // Тот же признак, что скрывает виджет, останавливает и опрос HID (см. Application).
-    AppState::Instance().SetFullscreenAppActive(fullscreen);
-    if (fullscreen || !IsTaskbarShowing()) {
+    SetFullscreenState(fullscreen);
+    const bool taskbarShowing = IsTaskbarShowing();
+    if (fullscreen || !taskbarShowing) {
         CancelDrag();
         m_headset.CancelDrag();
-        if (IsWindowVisible(m_hwnd)) ShowWindow(m_hwnd, SW_HIDE);
+        if (IsWindowVisible(m_hwnd)) {
+            if (!fullscreen) Diag::Log(L"hide: taskbar is not showing");
+            ShowWindow(m_hwnd, SW_HIDE);
+        }
         m_lastAppliedValid = false;
         m_headset.Relayout({}, 0, 0, false);
         RefreshAnimationState();
@@ -917,7 +942,7 @@ void CALLBACK WidgetWindow::StaticWinEventProc(HWINEVENTHOOK, DWORD event, HWND 
     if (event == EVENT_SYSTEM_FOREGROUND) {
         // Переключение фокуса — самый быстрый момент, чтобы остановить или вернуть опрос.
         const bool fullscreen = self->IsFullscreenAppActive();
-        AppState::Instance().SetFullscreenAppActive(fullscreen);
+        self->SetFullscreenState(fullscreen);
         if (fullscreen) {
             ShowWindow(self->m_hwnd, SW_HIDE);
             self->RefreshAnimationState();
@@ -982,9 +1007,11 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (wParam == TIMER_CHECK) {
             // Страховочный опрос раз в 500 мс: событие переднего плана могло не дойти.
             const bool fullscreen = IsFullscreenAppActive();
-            AppState::Instance().SetFullscreenAppActive(fullscreen);
-            if (fullscreen || !IsTaskbarShowing()) {
+            SetFullscreenState(fullscreen);
+            const bool taskbarShowing = IsTaskbarShowing();
+            if (fullscreen || !taskbarShowing) {
                 if (IsWindowVisible(hwnd)) {
+                    if (!fullscreen) Diag::Log(L"hide: taskbar is not showing");
                     ShowWindow(hwnd, SW_HIDE);
                     m_lastAppliedValid = false;
                     m_hoverTracking = false;
@@ -1371,11 +1398,17 @@ bool WidgetWindow::IsFullscreenAppActive() const noexcept {
     DWORD foregroundPid = 0;
     GetWindowThreadProcessId(hFore, &foregroundPid);
     if (foregroundPid != 0 && foregroundPid == GetCurrentProcessId()) return false;
+
+    // Все всплывашки оболочки — tool-window: у них нет кнопки на панели задач.
+    // Полноэкранные игры и видео обычными окнами и остаются.
+    if ((GetWindowLongPtrW(hFore, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return false;
+
+    if (_wcsnicmp(cls.data(), L"Xaml", 4) == 0) return false;
     static constexpr const wchar_t* kShellWindows[] = {
-        L"XamlExplorerHostIslandWindow",
         L"TopLevelWindowForOverflowXamlIsland",
         L"MultitaskingViewFrame",
         L"ForegroundStaging",
+        L"TaskListThumbnailWnd",
         L"Shell_TrayWnd",
         L"Shell_SecondaryTrayWnd",
     };

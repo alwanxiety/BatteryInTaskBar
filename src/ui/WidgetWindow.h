@@ -19,6 +19,8 @@ public:
     void Destroy();
     void Relayout();
     void ScheduleRelayout();
+    void SetFullscreenState(bool active);
+    void LogForegroundWindow() const;
     void ForceRestore() const;
     void NotifyTelemetryChanged() const noexcept;
 
@@ -125,6 +127,7 @@ private:
     bool m_hoverTimerActive{ false };
     bool m_menuOpen{ false };
     bool m_exitRequested{ false };  // WM_CLOSE пришёл, пока было открыто меню
+    bool m_fullscreenState{ false };
     float m_hoverProgress{ 0.0f };
     float m_hoverTarget{ 0.0f };
     ULONGLONG m_hoverLastTick{ 0 };
