@@ -367,6 +367,38 @@ std::uint64_t NowUnixMs() {
             std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+/// Процесс оболочки Windows: Explorer и её отдельные хосты (меню «Пуск»,
+/// поиск, быстрые настройки). Их всплывающие окна бывают размером на весь
+/// монитор, но полноэкранным приложением они не являются.
+bool IsShellHostProcess(DWORD processId) noexcept {
+    if (processId == 0) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) return false;
+
+    wchar_t path[MAX_PATH]{};
+    DWORD size = static_cast<DWORD>(std::size(path));
+    bool shell = false;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        const wchar_t* base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        static constexpr const wchar_t* kShellHosts[] = {
+            L"explorer.exe",
+            L"StartMenuExperienceHost.exe",
+            L"ShellExperienceHost.exe",
+            L"SearchHost.exe",
+            L"TextInputHost.exe",
+        };
+        for (const wchar_t* name : kShellHosts) {
+            if (_wcsicmp(base, name) == 0) {
+                shell = true;
+                break;
+            }
+        }
+    }
+    CloseHandle(process);
+    return shell;
+}
+
 }  // namespace
 
 bool WidgetWindow::ComputeSlots(std::vector<RECT>& slots, int& stepDip, bool forceAppsRefresh) {
@@ -1331,6 +1363,26 @@ bool WidgetWindow::IsFullscreenAppActive() const noexcept {
     std::array<WCHAR, 64> cls{};
     GetClassNameW(hFore, cls.data(), static_cast<int>(cls.size()));
     if (wcscmp(cls.data(), L"Progman") == 0 || wcscmp(cls.data(), L"WorkerW") == 0) return false;
+
+    // Всплывающие окна оболочки Windows 11 (превью задач, Task View, календарь,
+    // быстрые настройки, переполнение трея) — это окна на весь монитор с
+    // прозрачностью. Считать их полноэкранным приложением нельзя: иначе виджет
+    // исчезает при наведении на кнопку панели задач.
+    DWORD foregroundPid = 0;
+    GetWindowThreadProcessId(hFore, &foregroundPid);
+    if (foregroundPid != 0 && foregroundPid == GetCurrentProcessId()) return false;
+    static constexpr const wchar_t* kShellWindows[] = {
+        L"XamlExplorerHostIslandWindow",
+        L"TopLevelWindowForOverflowXamlIsland",
+        L"MultitaskingViewFrame",
+        L"ForegroundStaging",
+        L"Shell_TrayWnd",
+        L"Shell_SecondaryTrayWnd",
+    };
+    for (const wchar_t* name : kShellWindows) {
+        if (wcscmp(cls.data(), name) == 0) return false;
+    }
+
     RECT rcApp; GetWindowRect(hFore, &rcApp);
     // Сверяем с монитором, на котором стоит наша панель задач. Полноэкранная
     // игра на втором мониторе не должна прятать виджет на первом: Windows сам
@@ -1339,8 +1391,13 @@ bool WidgetWindow::IsFullscreenAppActive() const noexcept {
     HMONITOR hMon = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(MONITORINFO) };
     if (GetMonitorInfoW(hMon, &mi)) {
-        return (rcApp.left <= mi.rcMonitor.left && rcApp.top <= mi.rcMonitor.top &&
-                rcApp.right >= mi.rcMonitor.right && rcApp.bottom >= mi.rcMonitor.bottom);
+        const bool coversMonitor =
+            rcApp.left <= mi.rcMonitor.left && rcApp.top <= mi.rcMonitor.top &&
+            rcApp.right >= mi.rcMonitor.right && rcApp.bottom >= mi.rcMonitor.bottom;
+        if (!coversMonitor) return false;
+        // Окно на весь монитор, но принадлежит оболочке (меню «Пуск», поиск) —
+        // это не игра: виджет и опрос оставляем включёнными.
+        return !IsShellHostProcess(foregroundPid);
     }
     return false;
 }
