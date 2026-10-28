@@ -48,6 +48,8 @@ enum class Str {
     SubDisconnected,    // «нет связи»
     HeadsetName,        // «Наушники» (запасное имя второй плитки)
     HideWidget,         // «Скрыть виджет»
+    InjectFailedTitle,  // заголовок ошибки запуска
+    InjectFailedText,   // «Не удалось внедрить виджет в Explorer…»
 };
 
 namespace L10n {
@@ -60,6 +62,9 @@ void Init();
 
 /// "ru" / "en" — для журнала и отчётов.
 [[nodiscard]] const wchar_t* LanguageCode();
+
+/// "ru-RU" / "en-US" — культура для DirectWrite (а не только язык строк).
+[[nodiscard]] const wchar_t* LocaleName();
 
 /// "~8ч 24м" / "~8h 24m"
 [[nodiscard]] std::wstring Remaining(int minutes);

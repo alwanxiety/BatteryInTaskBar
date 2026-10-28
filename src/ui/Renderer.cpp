@@ -52,21 +52,21 @@ bool Renderer::Initialize() {
     if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(m_dwriteFactory.GetAddressOf())))) return false;
 
     if (FAILED(m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Display", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 8.5f, L"ru-RU", m_textFormatDevice.GetAddressOf()))) return false;
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 8.5f, L10n::LocaleName(), m_textFormatDevice.GetAddressOf()))) return false;
     if (FAILED(m_textFormatDevice->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return false;
 
     if (FAILED(m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Display", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 10.5f, L"ru-RU", m_textFormatPercent.GetAddressOf()))) return false;
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 10.5f, L10n::LocaleName(), m_textFormatPercent.GetAddressOf()))) return false;
     if (FAILED(m_textFormatPercent->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING))) return false;
 
     if (FAILED(m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Display", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 9.5f, L"ru-RU", m_textFormatSub.GetAddressOf()))) return false;
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 9.5f, L10n::LocaleName(), m_textFormatSub.GetAddressOf()))) return false;
     if (FAILED(m_textFormatSub->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return false;
 
     // Заголовок второй плитки — чуть крупнее, чтобы имя модели не терялось
     // рядом с тремя значениями заряда.
     if (FAILED(m_dwriteFactory->CreateTextFormat(L"Segoe UI Variable Display", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 9.0f, L"ru-RU", m_textFormatHeadsetTitle.GetAddressOf()))) return false;
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 9.0f, L10n::LocaleName(), m_textFormatHeadsetTitle.GetAddressOf()))) return false;
     if (FAILED(m_textFormatHeadsetTitle->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return false;
 
     return true;

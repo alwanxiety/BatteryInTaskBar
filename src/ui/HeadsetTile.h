@@ -28,6 +28,9 @@ public:
     void Invalidate();
     void DiscardDeviceResources();
     void TickAnimation(float phase);
+    /// Нужна ли этой плитке пульсация прямо сейчас (общая анимация виджета
+    /// не должна перерисовывать наушники, если пульсирует мышь).
+    void SetAnimation(bool needed) noexcept { m_animNeeded = needed; }
     void CancelDrag();
     void ShowContextMenu();
     /// Спрятать без анимации (полноэкранный режим, вертикальная панель).
@@ -51,6 +54,7 @@ public:
 private:
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessageSafe(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) noexcept;
 
     bool RegisterWindowClass();
     void UnregisterWindowClass();
@@ -111,6 +115,7 @@ private:
     bool m_hoverTimerActive{ false };
     ULONGLONG m_hoverLastTick{ 0 };
     float m_animPhase{ 0.0f };
+    bool m_animNeeded{ false };
 
     bool m_transitionActive{ false };
     bool m_transitionHide{ false };

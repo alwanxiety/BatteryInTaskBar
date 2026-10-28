@@ -5,6 +5,7 @@
 #include <setupapi.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cwctype>
 #include <string>
@@ -16,6 +17,8 @@
 #undef max
 
 namespace {
+std::atomic<bool> g_pollAbort{ false };
+
 std::wstring ToLowerCopy(std::wstring text) {
     if (!text.empty()) CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
     return text;
@@ -44,7 +47,9 @@ bool LooksLikeNonMouse(const std::wstring& name) {
     static constexpr const wchar_t* kOtherHints[] = {
         L"keyboard", L"клавиатур", L"iphone", L"ipad", L"phone", L"телефон",
         L"tablet", L"планшет", L"smartwatch", L"watch", L"часы",
-        L"airpods", L"beats", L"headphone", L"headset", L"buds", L"наушник"
+        L"airpods", L"beats", L"headphone", L"headset", L"buds", L"наушник",
+        L"gamepad", L"joystick", L"controller", L"геймпад", L"джойстик",
+        L"presenter", L"stylus", L"презентер", L"стилус"
     };
     for (const wchar_t* hint : kOtherHints) {
         if (ContainsNoCase(name, hint)) return true;
@@ -99,37 +104,6 @@ bool FindBatteryCap(PHIDP_PREPARSED_DATA preparsed, HIDP_REPORT_TYPE type, HIDP_
     return false;
 }
 
-bool ReadInputReport(HANDLE dev, const HIDP_CAPS& caps, UCHAR reportId,
-                     std::vector<uint8_t>& report) {
-    if (caps.InputReportByteLength == 0) return false;
-
-    report.assign(caps.InputReportByteLength, 0);
-    report[0] = reportId;
-    // Часть устройств отдаёт последний входной отчёт напрямую.
-    if (HidD_GetInputReport(dev, report.data(), static_cast<ULONG>(report.size()))) return true;
-
-    // Остальные — только потоком; ждём недолго, опрос не должен залипать.
-    std::vector<uint8_t> buffer(caps.InputReportByteLength, 0);
-    buffer[0] = reportId;
-    OVERLAPPED ov{};
-    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!ov.hEvent) return false;
-
-    DWORD read = 0;
-    bool ok = false;
-    if (ReadFile(dev, buffer.data(), static_cast<DWORD>(buffer.size()), &read, &ov) ||
-        GetLastError() == ERROR_IO_PENDING) {
-        if (WaitForSingleObject(ov.hEvent, 150) == WAIT_OBJECT_0 &&
-            GetOverlappedResult(dev, &ov, &read, FALSE) && read > 0) {
-            buffer.resize(read);
-            report = std::move(buffer);
-            ok = true;
-        }
-    }
-    CloseHandle(ov.hEvent);
-    return ok;
-}
-
 bool ReadFeatureReport(HANDLE dev, const HIDP_CAPS& caps, UCHAR reportId,
                        std::vector<uint8_t>& report) {
     if (caps.FeatureReportByteLength == 0) return false;
@@ -160,6 +134,71 @@ bool ExtractBatteryPercent(PHIDP_PREPARSED_DATA preparsed, HIDP_REPORT_TYPE type
     percent = result;
     return true;
 }
+
+/// Дождаться overlapped-запроса с таймаутом. По таймауту запрос отменяется, но
+/// вызывающий обязан знать, что структура OVERLAPPED и буфер свободны только
+/// после фактического завершения: ядро пишет результат именно туда.
+bool WaitForIo(HANDLE dev, OVERLAPPED& ov, DWORD timeoutMs, DWORD& transferred) noexcept {
+    if (WaitForSingleObject(ov.hEvent, timeoutMs) == WAIT_OBJECT_0) {
+        return GetOverlappedResult(dev, &ov, &transferred, FALSE) != FALSE;
+    }
+    // CancelIoEx завершает IRP, после чего GetOverlappedResult с ожиданием
+    // гарантирует, что ядро больше не тронет наш OVERLAPPED.
+    CancelIoEx(dev, &ov);
+    DWORD ignored = 0;
+    GetOverlappedResult(dev, &ov, &ignored, TRUE);
+    return false;
+}
+
+void ResetOverlapped(OVERLAPPED& ov) noexcept {
+    ov.Internal = 0;
+    ov.InternalHigh = 0;
+    ov.Offset = 0;
+    ov.OffsetHigh = 0;
+    if (ov.hEvent) ResetEvent(ov.hEvent);
+}
+
+bool ReadInputReport(HANDLE dev, const HIDP_CAPS& caps, UCHAR reportId,
+                     std::vector<uint8_t>& report) {
+    if (caps.InputReportByteLength == 0) return false;
+
+    report.assign(caps.InputReportByteLength, 0);
+    report[0] = reportId;
+    // Часть устройств отдаёт последний входной отчёт напрямую.
+    if (HidD_GetInputReport(dev, report.data(), static_cast<ULONG>(report.size()))) return true;
+
+    // Остальные — только потоком; ждём недолго, опрос не должен залипать.
+    std::vector<uint8_t> buffer(caps.InputReportByteLength, 0);
+    buffer[0] = reportId;
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    DWORD read = 0;
+    bool ok = false;
+    if (ReadFile(dev, buffer.data(), static_cast<DWORD>(buffer.size()), &read, &ov)) {
+        ok = read > 0;
+    } else if (GetLastError() == ERROR_IO_PENDING) {
+        ok = WaitForIo(dev, ov, 150, read) && read > 0;
+    }
+    // После WaitForIo отмена уже дождалась завершения, поэтому и OVERLAPPED,
+    // и буфер можно освобождать.
+    CloseHandle(ov.hEvent);
+    if (ok) {
+        buffer.resize(std::min<DWORD>(read, static_cast<DWORD>(buffer.size())));
+        report = std::move(buffer);
+    }
+    return ok;
+}
+
+}  // namespace
+
+void PollAbort::Set(bool requested) noexcept {
+    g_pollAbort.store(requested, std::memory_order_relaxed);
+}
+
+bool PollAbort::Requested() noexcept {
+    return g_pollAbort.load(std::memory_order_relaxed);
 }
 
 // --- LogitechProvider ---
@@ -169,12 +208,35 @@ bool LogitechProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry
     ReportSizes sizes{ caps.InputReportByteLength, caps.OutputReportByteLength };
     HIDD_ATTRIBUTES attr{ sizeof(HIDD_ATTRIBUTES) };
     if (!HidD_GetAttributes(hDev, &attr)) return false;
-    for (uint8_t d = 1; d <= 6; ++d) if (QueryCachedOrDiscover(hDev, sizes, attr.ProductID, d, outData)) return true;
-    return QueryCachedOrDiscover(hDev, sizes, attr.ProductID, 0xFF, outData);
+
+    // Сначала индексы, которые уже отвечали: у спящей мыши это единственная
+    // попытка вместо полного перебора шести индексов и 0xFF.
+    for (const BatteryCache& cached : m_cache) {
+        if (cached.pid != attr.ProductID || cached.type == BatteryCache::BatteryType::None) continue;
+        if (QueryCachedOrDiscover(hDev, sizes, attr.ProductID, cached.deviceIndex, outData)) return true;
+        if (PollAbort::Requested()) return false;
+    }
+    const auto alreadyTried = [this, pid = attr.ProductID](uint8_t index) {
+        for (const BatteryCache& cached : m_cache) {
+            if (cached.pid == pid && cached.deviceIndex == index &&
+                cached.type != BatteryCache::BatteryType::None) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (uint8_t d = 1; d <= 6; ++d) {
+        if (PollAbort::Requested()) return false;
+        if (!alreadyTried(d) && QueryCachedOrDiscover(hDev, sizes, attr.ProductID, d, outData)) return true;
+    }
+    if (PollAbort::Requested()) return false;
+    return !alreadyTried(0xFF) && QueryCachedOrDiscover(hDev, sizes, attr.ProductID, 0xFF, outData);
 }
 
 LogitechProvider::BatteryCache* LogitechProvider::FindCache(uint16_t pid, uint8_t devIdx) noexcept {
-    for (auto& c : m_cache) if (c.pid == pid && c.deviceIndex == devIdx && c.type != BatteryCache::BatteryType::None) return &c;
+    // Запись с типом None — это «уже пробовали и не нашли»: она хранит паузу
+    // перед повторным перечислением, поэтому pid/deviceIndex не сбрасываем.
+    for (auto& c : m_cache) if (c.pid == pid && c.deviceIndex == devIdx) return &c;
     for (auto& c : m_cache) if (c.pid == 0 && c.deviceIndex == 0) { c = BatteryCache{}; c.pid = pid; c.deviceIndex = devIdx; return &c; }
     return nullptr;
 }
@@ -196,8 +258,17 @@ bool LogitechProvider::QueryCachedOrDiscover(HANDLE hDev, const ReportSizes& siz
     BatteryCache* cache = FindCache(pid, devIdx);
     if (!cache) return false;
     if (cache->type == BatteryCache::BatteryType::None) {
+        // Недавно перечисляли и не нашли: спящая мышь не ответит и сейчас,
+        // а каждый такой перебор — это несколько таймаутов SendPacket.
+        if (GetTickCount64() < cache->retryDiscoveryTick) return false;
         cache->unifiedIndex = GetFeatureIndex(hDev, sizes, devIdx, 0x1004); cache->legacyIndex = GetFeatureIndex(hDev, sizes, devIdx, 0x1000); cache->voltageIndex = GetFeatureIndex(hDev, sizes, devIdx, 0x1001);
-        if (cache->unifiedIndex) cache->type = BatteryCache::BatteryType::Unified; else if (cache->legacyIndex) cache->type = BatteryCache::BatteryType::Legacy; else if (cache->voltageIndex) cache->type = BatteryCache::BatteryType::Voltage; else { *cache = BatteryCache{}; return false; }
+        if (cache->unifiedIndex) cache->type = BatteryCache::BatteryType::Unified; else if (cache->legacyIndex) cache->type = BatteryCache::BatteryType::Legacy; else if (cache->voltageIndex) cache->type = BatteryCache::BatteryType::Voltage;
+        if (cache->type == BatteryCache::BatteryType::None) {
+            // Конфигурацию не нашли — не стираем pid/индекс, иначе следующий
+            // цикл снова начнёт с нуля. Просто выдерживаем паузу.
+            cache->retryDiscoveryTick = GetTickCount64() + 15000;
+            return false;
+        }
         cache->nameIndex = GetFeatureIndex(hDev, sizes, devIdx, 0x0005); if (cache->nameIndex) cache->name = QueryDeviceNameWithIndex(hDev, sizes, devIdx, cache->nameIndex);
     }
     std::array<uint8_t, 20> resp{};
@@ -242,21 +313,40 @@ bool LogitechProvider::SendPacket(HANDLE hDev, const ReportSizes& sizes, uint8_t
     const bool longReport = sizes.outputLen >= 20 && sizes.inputLen >= 20; const uint8_t reportId = longReport ? 0x11 : 0x10;
     std::array<uint8_t, 256> report{}; report[0] = reportId; report[1] = devIdx; report[2] = featIdx; report[3] = static_cast<uint8_t>((fnId << 4) | 0x07);
     if (params.size()) memcpy(&report[4], params.data(), std::min(params.size(), (size_t)(longReport ? 16 : 3)));
-    OVERLAPPED ov{ .hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr) };
+
+    OVERLAPPED writeOv{};
+    writeOv.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!writeOv.hEvent) return false;
     DWORD written = 0;
-    if (!WriteFile(hDev, report.data(), sizes.outputLen, &written, &ov) && GetLastError() == ERROR_IO_PENDING) WaitForSingleObject(ov.hEvent, 75);
-    CloseHandle(ov.hEvent);
+    bool sent = false;
+    if (WriteFile(hDev, report.data(), sizes.outputLen, &written, &writeOv)) {
+        sent = true;
+    } else if (GetLastError() == ERROR_IO_PENDING) {
+        sent = WaitForIo(hDev, writeOv, 75, written);
+    }
+    CloseHandle(writeOv.hEvent);
+    if (!sent) return false;
+
     std::array<uint8_t, 256> response{};
-    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    OVERLAPPED readOv{};
+    readOv.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!readOv.hEvent) return false;
     for (int i = 0; i < 2; ++i) {
-        DWORD read = 0; ResetEvent(ov.hEvent);
-        if (ReadFile(hDev, response.data(), sizes.inputLen, &read, &ov) || GetLastError() == ERROR_IO_PENDING) {
-            if (WaitForSingleObject(ov.hEvent, 100) == WAIT_OBJECT_0 && GetOverlappedResult(hDev, &ov, &read, FALSE) && read >= 7 && response[0] == reportId && response[1] == devIdx && response[2] == featIdx) {
-                memcpy(outResponse.data(), response.data(), std::min<size_t>(read, 20)); CloseHandle(ov.hEvent); return true;
+        if (PollAbort::Requested()) break;
+        DWORD read = 0;
+        ResetOverlapped(readOv);
+        const bool started = ReadFile(hDev, response.data(), sizes.inputLen, &read, &readOv) != FALSE;
+        if (!started && GetLastError() != ERROR_IO_PENDING) continue;
+        if (started || WaitForIo(hDev, readOv, 100, read)) {
+            if (read >= 7 && response[0] == reportId && response[1] == devIdx && response[2] == featIdx) {
+                memcpy(outResponse.data(), response.data(), std::min<size_t>(read, 20));
+                CloseHandle(readOv.hEvent);
+                return true;
             }
         }
     }
-    CloseHandle(ov.hEvent); return false;
+    CloseHandle(readOv.hEvent);
+    return false;
 }
 
 uint8_t LogitechProvider::GetFeatureIndex(HANDLE hDev, const ReportSizes& sizes, uint8_t devIdx, uint16_t featureId) noexcept {
@@ -414,13 +504,7 @@ bool RedSquareProvider::Exchange17(HANDLE hDev, uint8_t command, std::array<uint
     if (WriteFile(hDev, request.data(), static_cast<DWORD>(request.size()), &written, &writeOv)) {
         sent = true;
     } else if (GetLastError() == ERROR_IO_PENDING) {
-        if (WaitForSingleObject(writeOv.hEvent, 100) == WAIT_OBJECT_0) {
-            DWORD transferred = 0;
-            sent = GetOverlappedResult(hDev, &writeOv, &transferred, FALSE) != FALSE;
-        } else {
-            CancelIoEx(hDev, &writeOv);
-            WaitForSingleObject(writeOv.hEvent, 50);
-        }
+        sent = WaitForIo(hDev, writeOv, 100, written);
     }
     CloseHandle(writeOv.hEvent);
     if (!sent) return false;
@@ -435,18 +519,16 @@ bool RedSquareProvider::Exchange17(HANDLE hDev, uint8_t command, std::array<uint
     std::array<uint8_t, 17> report{};
     bool found = false;
     while (!found && GetTickCount64() < deadline) {
+        if (PollAbort::Requested()) break;
         DWORD read = 0;
         report.fill(0);
-        ResetEvent(readOv.hEvent);
+        ResetOverlapped(readOv);
         if (!ReadFile(hDev, report.data(), static_cast<DWORD>(report.size()), &read, &readOv)) {
             if (GetLastError() != ERROR_IO_PENDING) break;
             const DWORD waitMs = static_cast<DWORD>(deadline > GetTickCount64() ? deadline - GetTickCount64() : 1);
-            if (WaitForSingleObject(readOv.hEvent, waitMs) != WAIT_OBJECT_0) {
-                CancelIoEx(hDev, &readOv);
-                WaitForSingleObject(readOv.hEvent, 50);
-                break;
-            }
-            if (!GetOverlappedResult(hDev, &readOv, &read, FALSE)) break;
+            // WaitForIo при таймауте сам отменяет запрос и дожидается отмены —
+            // освобождать OVERLAPPED раньше нельзя.
+            if (!WaitForIo(hDev, readOv, waitMs, read)) break;
         }
         // Эхо отчёта: 0x08 — report ID, вторым байтом возвращается команда.
         if (read >= 3 && report[0] == 0x08 && report[1] == command) found = true;
@@ -517,7 +599,9 @@ bool BluetoothProvider::Query(DeviceTelemetry& outData) {
     for (DWORD i = 0; SetupDiEnumDeviceInfo(hDevInfo, i, &devInfoData); ++i) {
         uint8_t batVal = 0; DWORD propSize = sizeof(batVal);
         if (!SetupDiGetDevicePropertyW(hDevInfo, &devInfoData, &kPkeyBatteryLevel, nullptr, &batVal, sizeof(batVal), &propSize, 0)) continue;
-        if (batVal == 0 || batVal > 100) continue;
+        // 0 — это честный «разряжен», а не «нет данных»: свойство батареи
+        // существует только у устройств с батареей.
+        if (batVal > 100) continue;
 
         DeviceTelemetry candidate;
         std::array<WCHAR, 128> name{};
@@ -553,6 +637,7 @@ bool PnpBatteryProvider::Query(DeviceTelemetry& outData) {
 
         SP_DEVINFO_DATA info{ sizeof(SP_DEVINFO_DATA) };
         for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &info); ++i) {
+            if (PollAbort::Requested()) break;
             DEVPROPTYPE type = 0;
             DWORD needed = 0;
             if (!SetupDiGetDevicePropertyW(set, &info, &kPkeyBatteryLevel, &type, nullptr, 0, &needed, 0) ||
@@ -575,7 +660,10 @@ bool PnpBatteryProvider::Query(DeviceTelemetry& outData) {
             } else if (type == DEVPROP_TYPE_INT32 && needed >= 4) {
                 level = *reinterpret_cast<const LONG*>(raw.data());
             }
-            if (level <= 0 || level > 100) continue;
+            // Ноль — валидное значение (полностью разряжено): свойство батареи
+            // есть только у устройств с батареей, «нет данных» выглядит как
+            // отсутствие свойства, а не как 0.
+            if (level < 0 || level > 100) continue;
 
             wchar_t friendly[256]{};
             std::wstring name;

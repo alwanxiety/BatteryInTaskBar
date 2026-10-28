@@ -5,10 +5,12 @@
 class Application {
 public:
     explicit Application(HMODULE hModule);
-    void Run();
+    /// true — всё остановилось штатно и DLL можно выгружать.
+    bool Run();
 
 private:
-    void Stop();
+    /// false — какой-то поток не удалось остановить; выгружать DLL нельзя.
+    bool Stop();
     static DWORD WINAPI StaticPollingThread(LPVOID param);
     DWORD PollingWorker();
 

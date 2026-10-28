@@ -15,6 +15,7 @@ add_library(taskbar_mod SHARED
         src/system/WindowScanner.cpp
         src/ui/Renderer.cpp
         src/ui/WidgetWindow.cpp
+        src/ui/AppsEdgeProbe.cpp
         src/ui/ContextMenu.cpp
         src/ui/SlotOverlay.cpp
         src/ui/HeadsetTile.cpp

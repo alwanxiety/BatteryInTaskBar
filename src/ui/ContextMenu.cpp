@@ -4,6 +4,8 @@
 #endif
 
 #include "ui/ContextMenu.h"
+#include "core/Diagnostics.h"
+#include "core/Localization.h"
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
@@ -65,6 +67,29 @@ D2D1_COLOR_F MakeColor(float r, float g, float b, float a = 1.0f) {
     return D2D1::ColorF(r, g, b, a);
 }
 
+// Фабрики D2D/DWrite создаём один раз на загрузку DLL: они потокобезопасны в
+// режиме SINGLE_THREADED только для одного потока, а все меню живут на UI-потоке
+// виджета. Раньше каждая менюшка создавала свои — это лишние объекты и время
+// на каждое открытие.
+ID2D1Factory* SharedD2DFactory() {
+    static ComPtr<ID2D1Factory> factory = [] {
+        ComPtr<ID2D1Factory> created;
+        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, created.GetAddressOf());
+        return created;
+    }();
+    return factory.Get();
+}
+
+IDWriteFactory* SharedDWriteFactory() {
+    static ComPtr<IDWriteFactory> factory = [] {
+        ComPtr<IDWriteFactory> created;
+        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                            reinterpret_cast<IUnknown**>(created.GetAddressOf()));
+        return created;
+    }();
+    return factory.Get();
+}
+
 }  // namespace
 
 class Win11Menu {
@@ -85,6 +110,9 @@ public:
     bool ExternalClick(POINT screenPt);
     void ExternalKey(WPARAM vk);
     void Close() { Dismiss(); }
+
+    /// Закрыть меню, которое сейчас показывает вложенный цикл (если есть).
+    static void CloseActive();
 
 private:
     bool Init();
@@ -161,6 +189,7 @@ private:
     ULONGLONG m_lastTick{ 0 };
     UINT m_result{ 0 };
     int m_titleClicks{ 0 };
+    ULONGLONG m_titleLastClick{ 0 };
 
     int m_winX{ 0 };
     int m_winY{ 0 };
@@ -182,6 +211,10 @@ private:
     HBITMAP m_dib{ nullptr };
     HGDIOBJ m_oldBitmap{ nullptr };
     void* m_bits{ nullptr };
+
+    // Меню, которое сейчас крутит вложенный цикл сообщений. Нужно, чтобы
+    // WM_CLOSE мог сначала закрыть меню, а уже потом разрушать окно владельца.
+    inline static Win11Menu* s_active{ nullptr };
 };
 
 Win11Menu::Win11Menu(HINSTANCE hInst, HWND owner, bool darkTheme, RECT anchor,
@@ -194,14 +227,14 @@ Win11Menu::~Win11Menu() {
 }
 
 bool Win11Menu::Init() {
-    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m_d2dFactory.GetAddressOf()))) return false;
+    m_d2dFactory = SharedD2DFactory();
+    m_dwrite = SharedDWriteFactory();
+    if (!m_d2dFactory || !m_dwrite) return false;
     const D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
         D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
         D2D1_LINE_JOIN_ROUND, 0.0f, D2D1_DASH_STYLE_SOLID, 0.0f);
     if (FAILED(m_d2dFactory->CreateStrokeStyle(strokeProps, nullptr, 0,
                                                m_roundStroke.GetAddressOf()))) return false;
-    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                   reinterpret_cast<IUnknown**>(m_dwrite.GetAddressOf())))) return false;
     if (!CreateTextFormats()) return false;
     BuildLayout();
     if (!CreateMenuWindow()) return false;
@@ -213,11 +246,11 @@ bool Win11Menu::CreateTextFormats() {
     auto create = [this](const wchar_t* family, float size, DWRITE_FONT_WEIGHT weight,
                          ComPtr<IDWriteTextFormat>& out) {
         HRESULT hr = m_dwrite->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
-                                                DWRITE_FONT_STRETCH_NORMAL, size, L"ru-RU",
+                                                DWRITE_FONT_STRETCH_NORMAL, size, L10n::LocaleName(),
                                                 out.GetAddressOf());
         if (FAILED(hr) && wcscmp(family, L"Segoe UI Variable Text") == 0) {
             hr = m_dwrite->CreateTextFormat(L"Segoe UI", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
-                                            DWRITE_FONT_STRETCH_NORMAL, size, L"ru-RU",
+                                            DWRITE_FONT_STRETCH_NORMAL, size, L10n::LocaleName(),
                                             out.GetAddressOf());
         }
         if (FAILED(hr)) return false;
@@ -460,7 +493,9 @@ void Win11Menu::Cleanup() {
     if (m_dib) { DeleteObject(m_dib); m_dib = nullptr; }
     if (m_memDC) { DeleteDC(m_memDC); m_memDC = nullptr; }
     if (!m_className.empty()) {
-        UnregisterClassW(m_className.c_str(), m_hInst);
+        if (!UnregisterClassW(m_className.c_str(), m_hInst)) {
+            Diag::Log(L"menu: UnregisterClass failed, error=%lu", GetLastError());
+        }
         m_className.clear();
     }
 }
@@ -470,6 +505,7 @@ UINT Win11Menu::Run() {
         Cleanup();
         return 0;
     }
+    s_active = this;
 
     // Высокоточный таймер кадров: SetTimer/WM_TIMER дают шаг ~15.6 мс, из-за чего
     // анимация открытия выглядела как несколько рывков. Фолбэк — обычный WM_TIMER.
@@ -491,7 +527,37 @@ UINT Win11Menu::Run() {
     bool gotQuit = false;
     WPARAM quitParam = 0;
     const DWORD msgIndex = frameTimer ? WAIT_OBJECT_0 + 1 : WAIT_OBJECT_0;
+
+    // Кадры нужны только пока что-то движется. Открытое, но «застывшее» меню
+    // не должно будить поток 140 раз в секунду high-resolution таймером.
+    auto needsFrames = [this]() -> bool {
+        if (!m_showDone || m_closing || m_submenu) return true;
+        if (m_hoverFromMouse && HasSubmenu(m_hover)) return true;  // задержка подменю
+        for (std::size_t i = 0; i < m_hoverProgress.size(); ++i) {
+            const float target = (static_cast<int>(i) == m_hover) ? 1.0f : 0.0f;
+            if (m_hoverProgress[i] != target) return true;
+        }
+        return false;
+    };
+    auto armTimer = [&](bool arm) {
+        if (!frameTimer) return;
+        if (arm) {
+            LARGE_INTEGER due{};
+            due.QuadPart = -static_cast<LONGLONG>(kFramePeriodMs) * 10000LL;
+            SetWaitableTimer(frameTimer, &due, static_cast<LONG>(kFramePeriodMs), nullptr,
+                             nullptr, FALSE);
+        } else {
+            CancelWaitableTimer(frameTimer);
+        }
+    };
+    bool timerArmed = frameTimer != nullptr;
+
     while (!m_done) {
+        const bool wantFrames = !frameTimer || needsFrames();
+        if (frameTimer && wantFrames != timerArmed) {
+            armTimer(wantFrames);
+            timerArmed = wantFrames;
+        }
         const DWORD wait = MsgWaitForMultipleObjects(frameTimer ? 1 : 0, &frameTimer, FALSE,
                                                      INFINITE, QS_ALLINPUT);
         if (frameTimer && wait == WAIT_OBJECT_0) {
@@ -514,10 +580,19 @@ UINT Win11Menu::Run() {
 
     if (frameTimer) CloseHandle(frameTimer);
     Cleanup();
+    if (s_active == this) s_active = nullptr;
     // Если во вложенном цикле пришёл WM_QUIT (например, виджет закрыли из меню),
     // возвращаем его внешнему циклу приложения, иначе тот продолжит ждать сообщений.
     if (gotQuit) PostQuitMessage(static_cast<int>(quitParam));
     return m_result;
+}
+
+void Win11Menu::CloseActive() {
+    if (s_active) s_active->Dismiss();
+}
+
+void CloseActiveMenu() {
+    Win11Menu::CloseActive();
 }
 
 void Win11Menu::Render() {
@@ -940,7 +1015,11 @@ LRESULT CALLBACK Win11Menu::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         self = reinterpret_cast<Win11Menu*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
     if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
-    return SafeHandle(self, hwnd, msg, wParam, lParam);
+    try {
+        return SafeHandle(self, hwnd, msg, wParam, lParam);
+    } catch (...) {
+        return 0;
+    }
 }
 
 LRESULT Win11Menu::SafeHandle(Win11Menu* self, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1014,10 +1093,17 @@ LRESULT Win11Menu::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 // Скрытая команда поддержки: пять кликов по названию устройства
                 // собирают единый отчёт (версия, HID-дамп, журнал). Пункт-заголовок
                 // не выбирается обычным кликом, поэтому счётчик живёт только здесь.
+                // Счётчик сбрасывается, если клики идут не подряд: случайные
+                // правые клики за месяц не должны собирать отчёт.
                 const int titleIndex = TitleIndexAt(pt);
-                if (titleIndex >= 0 && ++m_titleClicks >= kReportClickCount) {
-                    m_result = m_items[titleIndex].id;
-                    Dismiss();
+                if (titleIndex >= 0) {
+                    const ULONGLONG now = GetTickCount64();
+                    if (now - m_titleLastClick > 1500) m_titleClicks = 0;
+                    m_titleLastClick = now;
+                    if (++m_titleClicks >= kReportClickCount) {
+                        m_result = m_items[titleIndex].id;
+                        Dismiss();
+                    }
                 }
             }
         }

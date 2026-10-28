@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 #include "core/Localization.h"
+#include "core/Diagnostics.h"
 #include "ui/ContextMenu.h"
 #include "ui/MenuIds.h"
 #include "ui/WidgetWindow.h"
@@ -103,7 +104,9 @@ bool HeadsetTile::RegisterWindowClass() {
 
 void HeadsetTile::UnregisterWindowClass() {
     if (m_className.empty()) return;
-    UnregisterClassW(m_className.c_str(), m_hInst);
+    if (!UnregisterClassW(m_className.c_str(), m_hInst)) {
+        Diag::Log(L"headset: UnregisterClass failed, error=%lu", GetLastError());
+    }
     m_className.clear();
 }
 
@@ -160,9 +163,9 @@ void HeadsetTile::Relayout(const std::vector<RECT>& slots, int stepDip, int mous
         return;
     }
     if (target != SlotFromOffset(static_cast<int>(slots.size())) || m_offsetDip < 0) {
-        // Запоминаем фактическую позицию, чтобы плитка не «прыгала» при
-        // следующем пересчёте, если её любимая ячейка занята мышью.
-        SetOffsetDip(target * m_stepDip, true);
+        // Позицию сохраняем только при первом размещении. Временный сдвиг из-за
+        // мыши в «любимой» ячейке не должен перезаписывать выбор пользователя.
+        SetOffsetDip(target * m_stepDip, m_offsetDip < 0);
     }
 
     if (!IsWindowVisible(m_hwnd)) {
@@ -320,7 +323,9 @@ void HeadsetTile::ForceRestore() const {
 
 void HeadsetTile::TickAnimation(float phase) {
     m_animPhase = phase;
-    if (IsVisible()) InvalidateRect(m_hwnd, nullptr, FALSE);
+    // Перерисовываем только когда пульсирует сама плитка наушников: при
+    // заряжающейся мыши окно наушников иначе мигало 30 раз в секунду зря.
+    if (m_animNeeded && IsVisible()) InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 bool HeadsetTile::IsVisible() const {
@@ -587,7 +592,11 @@ void HeadsetTile::ShowContextMenu() {
     items.push_back(std::move(hide));
 
     SetHover(0.0f);
+    // Пока меню открыто, владелец не должен двигать плитки: меню привязано
+    // к позиции окна.
+    m_owner.SetMenuOpen(true);
     const UINT chosen = ShowWin11Menu(m_hInst, m_hwnd, m_owner.MenuDark(), rc, items);
+    m_owner.NotifyMenuClosed();
 
     POINT cursor{};
     if (GetCursorPos(&cursor) && GetWindowRect(m_hwnd, &rc) && PtInRect(&rc, cursor)) {
@@ -608,13 +617,22 @@ LRESULT CALLBACK HeadsetTile::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         self = reinterpret_cast<HeadsetTile*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
     if (self) {
-        __try {
-            return self->HandleMessage(hwnd, msg, wParam, lParam);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        try {
+            return self->HandleMessageSafe(hwnd, msg, wParam, lParam);
+        } catch (...) {
+            // C++-исключение не должно уходить в user32 и ронять Explorer.
             return 0;
         }
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+LRESULT HeadsetTile::HandleMessageSafe(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) noexcept {
+    __try {
+        return HandleMessage(hwnd, msg, wParam, lParam);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
 }
 
 LRESULT HeadsetTile::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {

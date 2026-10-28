@@ -2,7 +2,9 @@
 #include "core/AppPaths.h"
 #include <windows.h>
 #include <cstdarg>
+#include <cstdio>
 #include <cwchar>
+#include <iterator>
 
 namespace {
 
@@ -56,7 +58,9 @@ void Diag::Log(const wchar_t* format, ...) {
     wchar_t message[2048]{};
     va_list args;
     va_start(args, format);
-    vswprintf_s(message, format, args);
+    // _TRUNCATE, а не fail-fast: слишком длинная строка (имя устройства, путь)
+    // не должна ронять Explorer через invalid parameter handler.
+    _vsnwprintf_s(message, std::size(message), _TRUNCATE, format, args);
     va_end(args);
 
     std::wstring line = Timestamp();
@@ -68,16 +72,35 @@ void Diag::Log(const wchar_t* format, ...) {
     HANDLE file = CreateFileW(g_path.c_str(), FILE_APPEND_DATA,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        LARGE_INTEGER size{};
-        if (GetFileSizeEx(file, &size) && size.QuadPart == 0) {
-            // BOM, иначе Блокнот покажет кириллицу как мусор.
-            const wchar_t bom = 0xFEFF;
-            WriteText(file, &bom, sizeof(bom));
-        }
-        WriteText(file, line.c_str(), static_cast<DWORD>(line.size() * sizeof(wchar_t)));
-        CloseHandle(file);
+    if (file == INVALID_HANDLE_VALUE) {
+        LeaveCriticalSection(&g_lock);
+        return;
     }
+
+    LARGE_INTEGER size{};
+    const bool haveSize = GetFileSizeEx(file, &size) != FALSE;
+    if (haveSize && static_cast<ULONGLONG>(size.QuadPart) > kMaxLogBytes) {
+        // Ротация на лету: за долгую сессию журнал иначе растёт без ограничений.
+        CloseHandle(file);
+        const std::wstring oldPath = g_path + L".old";
+        MoveFileExW(g_path.c_str(), oldPath.c_str(), MOVEFILE_REPLACE_EXISTING);
+        file = CreateFileW(g_path.c_str(), FILE_APPEND_DATA,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            LeaveCriticalSection(&g_lock);
+            return;
+        }
+        size.QuadPart = 0;
+    }
+
+    if (size.QuadPart == 0) {
+        // BOM, иначе Блокнот покажет кириллицу как мусор.
+        const wchar_t bom = 0xFEFF;
+        WriteText(file, &bom, sizeof(bom));
+    }
+    WriteText(file, line.c_str(), static_cast<DWORD>(line.size() * sizeof(wchar_t)));
+    CloseHandle(file);
     LeaveCriticalSection(&g_lock);
 }
 

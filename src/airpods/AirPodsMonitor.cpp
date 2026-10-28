@@ -36,9 +36,16 @@ namespace {
 // для появления/исчезновения плитки скан не нужен — он только обновляет заряд.
 constexpr DWORD kScanWindowMs = 5000;
 constexpr DWORD kScanPeriodMs = 30000;
+// Если ни разу не видели AirPods, нет смысла сканировать эфир каждые полминуты:
+// редкое окно всё равно поймает рекламу, а батарея ноутбука целее.
+constexpr DWORD kIdleScanPeriodMs = 120000;
 // Запасной вариант, если Windows не отдаёт состояние подключения: реклама
 // должна идти не реже полутора минут. Это старая стабильная схема без мигания.
 constexpr std::uint64_t kAdvertFallbackMs = 90000;
+// Windows иногда «залипает» в состоянии Connected (наушники уже в кейсе).
+// Полчаса без единой рекламы при живом подключении — это залипшее состояние,
+// а не нормальная работа: иначе плитка висит вечно.
+constexpr std::uint64_t kStaleConnectedMs = 30 * 60 * 1000;
 // Ограничение на карту адресов: в отчёте не нужен весь эфир.
 constexpr std::size_t kMaxAdvertRecords = 48;
 
@@ -211,6 +218,55 @@ const winrt::guid kBatteryLevelUuid{
 const winrt::guid kUserDescriptionUuid{
     0x00002901, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
 
+/// Общее состояние ожидания WinRT-операции. Event живёт в shared_ptr: если мы
+/// ушли по таймауту, колбэк Completed всё равно может выполниться позже, и
+/// закрывать хендл раньше времени нельзя.
+struct CompletionState {
+    HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<bool> completed{ false };
+
+    ~CompletionState() {
+        if (event) CloseHandle(event);
+    }
+};
+
+/// Дождаться IAsyncOperation с таймаутом. false — таймаут, отмена или ошибка.
+/// Без этого блокирующий .get() мог висеть десятки секунд и не давал закрыть
+/// виджет: Stop() ждал поток, а поток — Bluetooth-стек.
+template <typename TResult, typename TAsync>
+bool AwaitWithTimeout(const TAsync& operation, DWORD timeoutMs, HANDLE cancelEvent,
+                      TResult& result) noexcept {
+    try {
+        auto state = std::make_shared<CompletionState>();
+        if (!state->event) return false;
+
+        operation.Completed(
+            [state](const TAsync&, winrt::Windows::Foundation::AsyncStatus) {
+                state->completed.store(true, std::memory_order_release);
+                if (state->event) SetEvent(state->event);
+            });
+
+        HANDLE waits[2] = { state->event, cancelEvent };
+        const DWORD wait = WaitForMultipleObjects(cancelEvent ? 2 : 1, waits, FALSE, timeoutMs);
+        if (wait != WAIT_OBJECT_0) {
+            // Таймаут или остановка монитора: отменяем запрос сразу, чтобы
+            // закрытие виджета не ждало Bluetooth-стек.
+            try {
+                operation.Cancel();
+            } catch (...) {
+            }
+            // Небольшая пауза, чтобы отмена успела завершиться. Если нет —
+            // state остаётся жив, пока колбэк не отпустит shared_ptr.
+            WaitForSingleObject(state->event, 1000);
+        }
+        if (!state->completed.load(std::memory_order_acquire)) return false;
+        result = operation.GetResults();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 }  // namespace
 
 struct AirPodsMonitor::Impl {
@@ -283,15 +339,53 @@ struct AirPodsMonitor::Impl {
     winrt::event_token btAddedToken{};
     winrt::event_token btRemovedToken{};
     winrt::event_token btEnumToken{};
+    // Все подключённые BT-устройства, не только наушники: принадлежность
+    // определяется динамически (по имени или по адресу из Apple-рекламы),
+    // иначе переименованные AirPods навсегда оставались бы без плитки.
     std::map<std::wstring, std::wstring> connectedBtDevices;  // id -> имя
     bool btWatcherReady{ false };
     bool btWatcherFailed{ false };
     bool deviceConnected{ false };
+    ULONGLONG lastPairEnumTick{ 0 };
+
+    // Колбэки вотчера живут дольше момента Stop. Они захватывают не this, а
+    // это состояние: после остановки указатель обнуляется, и поздно пришедший
+    // вызов ничего не трогает. Иначе удаление Impl — use-after-free.
+    struct WatchState {
+        std::mutex mutex;
+        Impl* impl{ nullptr };
+    };
+    std::shared_ptr<WatchState> watchState;
 
     bool scanning{ false };
     int scanCount{ 0 };
     int advertCount{ 0 };
     std::wstring lastError;
+
+    /// Наши ли это наушники. Имя — быстрый путь; если пользователь переименовал
+    /// AirPods, сверяем id подключённого устройства с адресом, который прислала
+    /// Apple-реклама (id содержит MAC).
+    bool IsOurHeadsetLocked(const std::wstring& id, const std::wstring& name) const {
+        if (LooksLikeHeadsetName(name)) return true;
+        if (lastAppleAddress == 0) return false;
+
+        const std::wstring colon = Lower(AddressText(lastAppleAddress));
+        if (Lower(id).find(colon) != std::wstring::npos) return true;
+
+        std::wstring compact;
+        compact.reserve(colon.size());
+        for (const wchar_t ch : colon) {
+            if (ch != L':') compact.push_back(ch);
+        }
+        return Lower(id).find(compact) != std::wstring::npos;
+    }
+
+    bool AnyHeadsetConnectedLocked() const {
+        for (const auto& [id, name] : connectedBtDevices) {
+            if (IsOurHeadsetLocked(id, name)) return true;
+        }
+        return false;
+    }
 
     void StartBtWatcher() {
         using namespace winrt::Windows::Devices::Bluetooth;
@@ -300,61 +394,93 @@ struct AirPodsMonitor::Impl {
         try {
             btWatcher = DeviceInformation::CreateWatcher(
                 BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected));
+            watchState = std::make_shared<WatchState>();
+            watchState->impl = this;
+            const std::shared_ptr<WatchState> state = watchState;
 
             btAddedToken = btWatcher.Added(
-                [this](const DeviceWatcher&, const DeviceInformation& info) {
+                [state](const DeviceWatcher&, const DeviceInformation& info) {
                     try {
-                        const std::wstring name = info.Name().c_str();
-                        if (!LooksLikeHeadsetName(name)) return;
-                        const std::wstring id = info.Id().c_str();
-                        {
-                            std::lock_guard lock(mutex);
-                            connectedBtDevices[id] = name;
-                            deviceConnected = true;
+                        std::wstring name;
+                        std::wstring id;
+                        try {
+                            name = info.Name().c_str();
+                            id = info.Id().c_str();
+                        } catch (...) {
+                            return;
                         }
-                        Diag::Log(L"airpods: headset connected (%ls)", name.c_str());
+                        bool ours = false;
+                        {
+                            // Держим state->mutex, пока берём Impl: после Stop
+                            // указатель уже nullptr, и поздно пришедший колбэк
+                            // не тронет удалённый объект.
+                            std::lock_guard stateLock(state->mutex);
+                            Impl* self = state->impl;
+                            if (!self) return;
+                            std::lock_guard lock(self->mutex);
+                            self->connectedBtDevices[id] = name;
+                            ours = self->IsOurHeadsetLocked(id, name);
+                            self->deviceConnected = self->AnyHeadsetConnectedLocked();
+                        }
+                        if (ours) Diag::Log(L"airpods: headset connected (%ls)", name.c_str());
+                        // Скан просим на любое подключение BT: переименованные
+                        // наушники мы узнаем только по рекламе.
                         AppState::Instance().RequestAirPodsScan();
                     } catch (...) {
                     }
                 });
 
             btRemovedToken = btWatcher.Removed(
-                [this](const DeviceWatcher&, const DeviceInformationUpdate& update) {
+                [state](const DeviceWatcher&, const DeviceInformationUpdate& update) {
                     try {
                         const std::wstring id = update.Id().c_str();
+                        bool wasOurs = false;
                         bool disconnected = false;
                         std::wstring name;
                         {
-                            std::lock_guard lock(mutex);
-                            const auto it = connectedBtDevices.find(id);
-                            if (it != connectedBtDevices.end()) {
+                            std::lock_guard stateLock(state->mutex);
+                            Impl* self = state->impl;
+                            if (!self) return;
+                            std::lock_guard lock(self->mutex);
+                            const auto it = self->connectedBtDevices.find(id);
+                            if (it != self->connectedBtDevices.end()) {
                                 name = it->second;
-                                connectedBtDevices.erase(it);
+                                wasOurs = self->IsOurHeadsetLocked(id, name);
+                                self->connectedBtDevices.erase(it);
                             }
-                            if (connectedBtDevices.empty() && deviceConnected) {
-                                deviceConnected = false;
-                                disconnected = true;
-                            }
+                            const bool wasConnected = self->deviceConnected;
+                            self->deviceConnected = self->AnyHeadsetConnectedLocked();
+                            disconnected = wasConnected && !self->deviceConnected;
                         }
-                        if (disconnected) {
+                        if (wasOurs) {
                             Diag::Log(L"airpods: headset disconnected (%ls)",
                                       name.empty() ? L"unknown" : name.c_str());
+                        } else if (disconnected) {
+                            Diag::Log(L"airpods: headset disconnected");
                         }
                     } catch (...) {
                     }
                 });
 
             btEnumToken = btWatcher.EnumerationCompleted(
-                [this](const DeviceWatcher&, const winrt::Windows::Foundation::IInspectable&) {
+                [state](const DeviceWatcher&, const winrt::Windows::Foundation::IInspectable&) {
                     try {
-                        std::size_t count = 0;
+                        std::size_t total = 0;
+                        std::size_t headsets = 0;
                         {
-                            std::lock_guard lock(mutex);
-                            btWatcherReady = true;
-                            deviceConnected = !connectedBtDevices.empty();
-                            count = connectedBtDevices.size();
+                            std::lock_guard stateLock(state->mutex);
+                            Impl* self = state->impl;
+                            if (!self) return;
+                            std::lock_guard lock(self->mutex);
+                            self->btWatcherReady = true;
+                            self->deviceConnected = self->AnyHeadsetConnectedLocked();
+                            total = self->connectedBtDevices.size();
+                            for (const auto& [id, name] : self->connectedBtDevices) {
+                                if (self->IsOurHeadsetLocked(id, name)) ++headsets;
+                            }
                         }
-                        Diag::Log(L"airpods: bluetooth watcher ready, connected headsets=%zu", count);
+                        Diag::Log(L"airpods: bluetooth watcher ready, connected devices=%zu, headsets=%zu",
+                                  total, headsets);
                     } catch (...) {
                     }
                 });
@@ -371,26 +497,25 @@ struct AirPodsMonitor::Impl {
     }
 
     void StopBtWatcher() {
+        auto state = watchState;
         try {
-            if (!btWatcher) return;
-            btWatcher.Added(btAddedToken);
-            btWatcher.Removed(btRemovedToken);
-            btWatcher.EnumerationCompleted(btEnumToken);
+            if (btWatcher) {
+                btWatcher.Added(btAddedToken);
+                btWatcher.Removed(btRemovedToken);
+                btWatcher.EnumerationCompleted(btEnumToken);
+                btWatcher.Stop();
+            }
+        } catch (...) {
+        }
 
-            // Дожидаемся полной остановки: колбэки вотчера идут из пула
-            // потоков, и удалять Impl, пока они могут выполняться, нельзя.
-            auto stopped = std::make_shared<std::promise<void>>();
-            const auto stoppedToken = btWatcher.Stopped(
-                [stopped](const winrt::Windows::Devices::Enumeration::DeviceWatcher&,
-                          const winrt::Windows::Foundation::IInspectable&) {
-                    try {
-                        stopped->set_value();
-                    } catch (...) {
-                    }
-                });
-            btWatcher.Stop();
-            stopped->get_future().wait_for(std::chrono::milliseconds(1000));
-            btWatcher.Stopped(stoppedToken);
+        // Главное: отключаем колбэки от Impl. Даже если Stopped не пришёл и
+        // событие уже в пути, оно увидит nullptr и ничего не тронет. Захват
+        // shared_ptr держит состояние живым, поэтому удаление Impl безопасно.
+        if (state) {
+            std::lock_guard lock(state->mutex);
+            state->impl = nullptr;
+        }
+        try {
             btWatcher = nullptr;
         } catch (...) {
         }
@@ -411,12 +536,20 @@ struct AirPodsMonitor::Impl {
             telemetry.lastSeenUnixMs = lastAdvertUnixMs;
             telemetry.lastSuccessUnixMs = lastSuccessUnixMs;
             telemetry.hasData = lastSuccessUnixMs != 0;
+            telemetry.connectionKnown = btWatcherReady || btWatcherFailed;
 
             if (btWatcherReady) {
                 // Видимость определяется только реальным состоянием
                 // Bluetooth-подключения. Реклама обновляет заряд, но не может
                 // ни спрятать, ни показать плитку — поэтому нет мерцания.
-                telemetry.connected = deviceConnected;
+                bool connected = AnyHeadsetConnectedLocked();
+                // Сторож от «залипшего» Connected: если рекламы нет полчаса,
+                // система, скорее всего, просто не заметила отключение.
+                if (connected && lastAdvertUnixMs != 0 && now >= lastAdvertUnixMs &&
+                    (now - lastAdvertUnixMs) > kStaleConnectedMs) {
+                    connected = false;
+                }
+                telemetry.connected = connected;
             } else {
                 // Вотчер не поднялся — старая стабильная схема по рекламе.
                 telemetry.connected =
@@ -425,24 +558,6 @@ struct AirPodsMonitor::Impl {
                     (lastGattOkMs != 0 && now >= lastGattOkMs &&
                      (now - lastGattOkMs) <= kAdvertFallbackMs);
             }
-        }
-        AppState::Instance().UpdateAirPods(telemetry);
-    }
-
-    /// Опрос выключен (плитку скрыли): данные не считаются «на связи», иначе
-    /// после возобновления старый заряд выглядел бы как новое подключение.
-    void PublishDisconnected() {
-        AirPodsTelemetry telemetry;
-        {
-            std::lock_guard lock(mutex);
-            telemetry.deviceName = deviceName;
-            telemetry.leftLevel = leftLevel;
-            telemetry.rightLevel = rightLevel;
-            telemetry.caseLevel = caseLevel;
-            telemetry.lastSeenUnixMs = lastAdvertUnixMs;
-            telemetry.lastSuccessUnixMs = lastSuccessUnixMs;
-            telemetry.hasData = lastSuccessUnixMs != 0;
-            telemetry.connected = false;
         }
         AppState::Instance().UpdateAirPods(telemetry);
     }
@@ -497,9 +612,9 @@ struct AirPodsMonitor::Impl {
         // Компонент, который давно не приходил (наушник в кейсе), не должен
         // висеть вечным: через 15 минут неизвестность честнее старого числа.
         constexpr std::uint64_t kComponentTtlMs = 15 * 60 * 1000;
-        if (leftSeenMs != 0 && now - leftSeenMs > kComponentTtlMs) leftLevel = -1;
-        if (rightSeenMs != 0 && now - rightSeenMs > kComponentTtlMs) rightLevel = -1;
-        if (caseSeenMs != 0 && now - caseSeenMs > kComponentTtlMs) caseLevel = -1;
+        if (leftSeenMs != 0 && now >= leftSeenMs && now - leftSeenMs > kComponentTtlMs) leftLevel = -1;
+        if (rightSeenMs != 0 && now >= rightSeenMs && now - rightSeenMs > kComponentTtlMs) rightLevel = -1;
+        if (caseSeenMs != 0 && now >= caseSeenMs && now - caseSeenMs > kComponentTtlMs) caseLevel = -1;
 
         lastAdvertUnixMs = now;
         if (left >= 0 || right >= 0 || casePercent >= 0) {
@@ -548,9 +663,17 @@ struct AirPodsMonitor::Impl {
 
         std::vector<DeviceRecord> records;
         try {
-            const DeviceInformationCollection devices =
-                DeviceInformation::FindAllAsync(BluetoothLEDevice::GetDeviceSelectorFromPairingState(true)).get();
+            DeviceInformationCollection devices{ nullptr };
+            if (!AwaitWithTimeout(
+                    DeviceInformation::FindAllAsync(
+                        BluetoothLEDevice::GetDeviceSelectorFromPairingState(true)),
+                    5000, stopEvent, devices)) {
+                std::lock_guard lock(mutex);
+                lastError = L"BLE enumeration timed out";
+                return;
+            }
             for (const DeviceInformation& info : devices) {
+                if (WaitForSingleObject(stopEvent, 0) != WAIT_TIMEOUT) break;
                 DeviceRecord record;
                 try {
                     record.name = info.Name().c_str();
@@ -565,9 +688,9 @@ struct AirPodsMonitor::Impl {
                         }
                     }
                     if (record.address == 0) {
-                        const BluetoothLEDevice device =
-                            BluetoothLEDevice::FromIdAsync(info.Id()).get();
-                        if (device) {
+                        BluetoothLEDevice device{ nullptr };
+                        if (AwaitWithTimeout(BluetoothLEDevice::FromIdAsync(info.Id()), 3000, stopEvent, device) &&
+                            device) {
                             record.address = device.BluetoothAddress();
                             device.Close();
                         }
@@ -617,10 +740,8 @@ struct AirPodsMonitor::Impl {
         }
 
         BluetoothLEDevice device{ nullptr };
-        try {
-            device = BluetoothLEDevice::FromBluetoothAddressAsync(address).get();
-        } catch (const winrt::hresult_error& error) {
-            info.error = L"connect failed: " + std::wstring(error.message().c_str());
+        if (!AwaitWithTimeout(BluetoothLEDevice::FromBluetoothAddressAsync(address), 4000, stopEvent, device)) {
+            info.error = L"connect timed out";
             store();
             return;
         }
@@ -635,20 +756,30 @@ struct AirPodsMonitor::Impl {
             info.name = device.Name().c_str();
             info.access = AccessText(device.DeviceAccessInformation().CurrentStatus());
 
-            const GattDeviceServicesResult services =
-                device.GetGattServicesAsync(BluetoothCacheMode::Uncached).get();
-            info.status = GattStatusText(services.Status());
-
-            if (services.Status() != GattCommunicationStatus::Success) {
-                info.error = L"battery services unavailable";
+            GattDeviceServicesResult services{ nullptr };
+            if (!AwaitWithTimeout(device.GetGattServicesAsync(BluetoothCacheMode::Uncached), 4000,
+                                  stopEvent, services)) {
+                info.error = L"battery services timed out";
             } else {
+                info.status = GattStatusText(services.Status());
+            }
+
+            if (info.error.empty() && services.Status() != GattCommunicationStatus::Success) {
+                info.error = L"battery services unavailable";
+            } else if (info.error.empty()) {
                 for (const GattDeviceService& service : services.Services()) {
+                    if (WaitForSingleObject(stopEvent, 0) != WAIT_TIMEOUT) break;
                     const bool batteryService = service.Uuid() == kBatteryServiceUuid;
-                    const GattCharacteristicsResult characteristics =
-                        service.GetCharacteristicsAsync(BluetoothCacheMode::Uncached).get();
-                    if (characteristics.Status() != GattCommunicationStatus::Success) continue;
+                    GattCharacteristicsResult characteristics{ nullptr };
+                    if (!AwaitWithTimeout(
+                            service.GetCharacteristicsAsync(BluetoothCacheMode::Uncached), 3000,
+                            stopEvent, characteristics) ||
+                        characteristics.Status() != GattCommunicationStatus::Success) {
+                        continue;
+                    }
 
                     for (const GattCharacteristic& characteristic : characteristics.Characteristics()) {
+                        if (WaitForSingleObject(stopEvent, 0) != WAIT_TIMEOUT) break;
                         GattEntry entry;
                         entry.service = UuidText(service.Uuid());
                         entry.characteristic = UuidText(characteristic.Uuid());
@@ -673,23 +804,32 @@ struct AirPodsMonitor::Impl {
                         if (isBatteryLevel &&
                             (properties & GattCharacteristicProperties::Read) ==
                                 GattCharacteristicProperties::Read) {
-                            const GattReadResult read =
-                                characteristic.ReadValueAsync(BluetoothCacheMode::Uncached).get();
-                            entry.status = GattStatusText(read.Status());
-                            if (read.Status() == GattCommunicationStatus::Success) {
-                                const std::vector<std::uint8_t> bytes = BufferBytes(read.Value());
-                                entry.hex = HexBytes(bytes);
-                                if (!bytes.empty() && bytes[0] <= 100) entry.level = bytes[0];
+                            GattReadResult read{ nullptr };
+                            if (AwaitWithTimeout(
+                                    characteristic.ReadValueAsync(BluetoothCacheMode::Uncached), 3000,
+                                    stopEvent, read)) {
+                                entry.status = GattStatusText(read.Status());
+                                if (read.Status() == GattCommunicationStatus::Success) {
+                                    const std::vector<std::uint8_t> bytes = BufferBytes(read.Value());
+                                    entry.hex = HexBytes(bytes);
+                                    if (!bytes.empty() && bytes[0] <= 100) entry.level = bytes[0];
+                                }
+                            } else {
+                                entry.status = L"read timed out";
                             }
 
-                            const GattDescriptorsResult descriptors =
-                                characteristic.GetDescriptorsAsync(BluetoothCacheMode::Uncached).get();
-                            if (descriptors.Status() == GattCommunicationStatus::Success) {
+                            GattDescriptorsResult descriptors{ nullptr };
+                            if (AwaitWithTimeout(
+                                    characteristic.GetDescriptorsAsync(BluetoothCacheMode::Uncached),
+                                    3000, stopEvent, descriptors) &&
+                                descriptors.Status() == GattCommunicationStatus::Success) {
                                 for (const GattDescriptor& descriptor : descriptors.Descriptors()) {
                                     if (descriptor.Uuid() != kUserDescriptionUuid) continue;
-                                    const GattReadResult value =
-                                        descriptor.ReadValueAsync(BluetoothCacheMode::Uncached).get();
-                                    if (value.Status() == GattCommunicationStatus::Success) {
+                                    GattReadResult value{ nullptr };
+                                    if (AwaitWithTimeout(
+                                            descriptor.ReadValueAsync(BluetoothCacheMode::Uncached),
+                                            2000, stopEvent, value) &&
+                                        value.Status() == GattCommunicationStatus::Success) {
                                         entry.description = Utf8ToWide(BufferBytes(value.Value()));
                                     }
                                 }
@@ -869,6 +1009,19 @@ struct AirPodsMonitor::Impl {
     }
 
     DWORD Run() {
+        try {
+            return RunInner();
+        } catch (...) {
+            // std::terminate здесь означал бы падение explorer.exe.
+            try {
+                Diag::Log(L"airpods: worker aborted by exception");
+            } catch (...) {
+            }
+        }
+        return 0;
+    }
+
+    DWORD RunInner() {
         bool apartment = false;
         try {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -889,8 +1042,10 @@ struct AirPodsMonitor::Impl {
             }
 
             if (!AppState::Instance().IsAirPodsEnabled()) {
-                // Плитку скрыли вручную — опрос и состояние сбрасываем.
-                PublishDisconnected();
+                // Плитку скрыли вручную: не сканируем эфир, но состояние
+                // подключения продолжаем публиковать — по нему виджет узнаёт
+                // о настоящем отключении и снимает «скрыто».
+                Publish();
                 WaitForSingleObject(stopEvent, 500);
                 continue;
             }
@@ -901,6 +1056,22 @@ struct AirPodsMonitor::Impl {
                 // после выхода плитка вернулась сразу, как у мыши.
                 WaitForSingleObject(stopEvent, 500);
                 continue;
+            }
+
+            // Пока AirPods ни разу не видели, нечего сканировать каждые 30 с:
+            // редкое окно всё равно поймает рекламу после сопряжения, а батарея
+            // ноутбука не тратится на постоянный радиообмен.
+            std::uint64_t knownAddress = 0;
+            {
+                std::lock_guard lock(mutex);
+                knownAddress = lastAppleAddress;
+            }
+            if (knownAddress == 0 &&
+                (lastPairEnumTick == 0 || GetTickCount64() - lastPairEnumTick > 300000)) {
+                EnumeratePairedBle();
+                lastPairEnumTick = GetTickCount64();
+                std::lock_guard lock(mutex);
+                knownAddress = lastAppleAddress;
             }
 
             ScanOnce();
@@ -926,7 +1097,8 @@ struct AirPodsMonitor::Impl {
             Publish();
 
             // Пауза между окнами сканирования; просыпаемся на события.
-            const ULONGLONG until = GetTickCount64() + kScanPeriodMs;
+            const DWORD period = knownAddress != 0 ? kScanPeriodMs : kIdleScanPeriodMs;
+            const ULONGLONG until = GetTickCount64() + period;
             while (GetTickCount64() < until) {
                 if (WaitForSingleObject(stopEvent, 250) != WAIT_TIMEOUT) goto finish;
                 if (AppState::Instance().CheckAndResetAirPodsScan()) break;
@@ -976,13 +1148,19 @@ bool AirPodsMonitor::Start() {
     return true;
 }
 
-void AirPodsMonitor::Stop() {
-    if (!m_impl) return;
+bool AirPodsMonitor::Stop() {
+    if (!m_impl) return true;
     if (m_impl->stopEvent) SetEvent(m_impl->stopEvent);
     if (m_impl->thread) {
-        // Ждём до конца, а не по таймауту: удалять Impl, пока поток ещё
-        // пользуется WinRT, нельзя — это use-after-free внутри Explorer.
-        WaitForSingleObject(m_impl->thread, INFINITE);
+        // Ждём не бесконечно: WinRT-вызов ограничен таймаутом, но если поток
+        // всё же застрял, удалять Impl и выгружать DLL нельзя — это
+        // use-after-free внутри Explorer. Тогда намеренно оставляем всё жить.
+        const DWORD wait = WaitForSingleObject(m_impl->thread, 15000);
+        if (wait != WAIT_OBJECT_0) {
+            Diag::Log(L"airpods: monitor did not stop in 15 s, keeping it loaded");
+            m_impl = nullptr;  // поток всё ещё пользуется кодом этой DLL
+            return false;
+        }
         CloseHandle(m_impl->thread);
         m_impl->thread = nullptr;
     }
@@ -992,6 +1170,7 @@ void AirPodsMonitor::Stop() {
     }
     delete m_impl;
     m_impl = nullptr;
+    return true;
 }
 
 void AirPodsMonitor::AppendDiagnostics(std::wstring& out) const {
@@ -1035,7 +1214,9 @@ void AirPodsMonitor::AppendDiagnostics(std::wstring& out) const {
                m_impl->deviceConnected ? L"yes" : L"no");
     out += buffer;
     for (const auto& [id, name] : m_impl->connectedBtDevices) {
-        out += L"    connected: " + name + L"  id=" + id + L"\r\n";
+        const bool ours = m_impl->IsOurHeadsetLocked(id, name);
+        out += std::wstring(ours ? L"    connected (headset): " : L"    connected: ") + name +
+               L"  id=" + id + L"\r\n";
     }
 
     auto levelText = [](int level, bool charging) -> std::wstring {

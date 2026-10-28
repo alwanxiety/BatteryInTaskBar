@@ -37,6 +37,10 @@ struct AirPodsTelemetry {
     bool caseCharging = false;
 
     bool connected = false;  // реклама устройства видна прямо сейчас (или недавно)
+    // true — состояние подключения известно (Bluetooth-вотчер поднялся или
+    // ушёл в запасной режим). Нужно, чтобы «скрыть виджет» не снималось
+    // раньше, чем мы реально узнали об отключении.
+    bool connectionKnown = false;
     bool hasData = false;    // хотя бы один раз удалось разобрать заряд
     std::uint64_t lastSeenUnixMs = 0;   // последняя реклама AirPods
     std::uint64_t lastSuccessUnixMs = 0;  // последняя реклама с валидным зарядом

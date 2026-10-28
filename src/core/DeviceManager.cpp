@@ -56,6 +56,7 @@ bool DeviceManager::EnumerateCandidates() {
     bool sawSupported = false;
 
     for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devInfo, nullptr, &hidGuid, i, &devData); ++i) {
+        if (PollAbort::Requested()) break;
         DWORD requiredSize = 0;
         SetupDiGetDeviceInterfaceDetailW(devInfo, &devData, nullptr, 0, &requiredSize, nullptr);
         if (requiredSize == 0) continue;
@@ -123,6 +124,14 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
         ULONGLONG start;
         ~CycleTimer() { trace.totalMs = static_cast<int>(GetTickCount64() - start); }
     } cycleTimer{ m_lastTrace, cycleStart };
+    // Провайдеры проверяют флаг PollAbort внутри своих переборов; после цикла
+    // его обязательно сбрасываем, иначе следующий опрос завершится сразу.
+    struct AbortReset {
+        ~AbortReset() { PollAbort::Set(false); }
+    } abortReset;
+    const auto abortRequested = [shouldAbort] {
+        return shouldAbort != nullptr && shouldAbort();
+    };
 
     const ULONGLONG now = GetTickCount64();
     bool needEnumerate = false;
@@ -138,6 +147,8 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
 
     auto tryCandidate = [&](const Candidate& candidate) -> bool {
         if (!candidate.provider) return false;
+        // Свежий флаг: провайдер прекратит перебор, если игра уже на весь экран.
+        PollAbort::Set(abortRequested());
 
         const ULONGLONG attemptStart = GetTickCount64();
         // Свежий снимок на каждую попытку: провайдер не «загрязняет» данные следующего.
@@ -177,9 +188,13 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
     // Интерфейс и провайдер, ответившие в прошлый раз, опрашиваем первыми:
     // «молчащие» интерфейсы ресивера иначе тратят таймауты на каждом цикле.
     const bool haveLastGood = !m_lastGoodPath.empty() && m_lastGoodProvider != static_cast<std::size_t>(-1);
-    const auto abortRequested = [shouldAbort] { return shouldAbort != nullptr && shouldAbort(); };
-    const auto stop = [this] { m_lastTrace.aborted = true; return false; };
-    if (abortRequested()) return stop();
+    const auto syncAbort = [&abortRequested] {
+        const bool aborted = abortRequested();
+        PollAbort::Set(aborted);
+        return aborted;
+    };
+    const auto stop = [this] { m_lastTrace.aborted = true; PollAbort::Set(false); return false; };
+    if (syncAbort()) return stop();
     if (haveLastGood) {
         for (const Candidate& candidate : m_candidates) {
             if (candidate.path == m_lastGoodPath && candidate.priority == m_lastGoodProvider && tryCandidate(candidate)) return true;
@@ -189,11 +204,11 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
         if (haveLastGood && candidate.path == m_lastGoodPath && candidate.priority == m_lastGoodProvider) continue;
         // Полноэкранная игра могла начаться прямо сейчас — не тратим ещё ~1 с на
         // следующий молчащий интерфейс.
-        if (abortRequested()) return stop();
+        if (syncAbort()) return stop();
         if (tryCandidate(candidate)) return true;
     }
 
-    if (abortRequested()) return stop();
+    if (syncAbort()) return stop();
     m_lastTrace.bluetoothTried = true;
     DeviceTelemetry bluetoothTelemetry;
     if (QueryBluetooth(bluetoothTelemetry)) {

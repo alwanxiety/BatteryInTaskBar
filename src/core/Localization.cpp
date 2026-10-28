@@ -58,9 +58,16 @@ constexpr Entry kStrings[] = {
     /* SubDisconnected  */ { L"нет связи", L"disconnected" },
     /* HeadsetName      */ { L"Наушники", L"Headphones" },
     /* HideWidget       */ { L"Скрыть виджет", L"Hide widget" },
+    /* InjectFailedTitle*/ { L"BatteryInTaskBar", L"BatteryInTaskBar" },
+    /* InjectFailedText */ { L"Не удалось внедрить виджет в Explorer.\n\n"
+                             L"Перезапустите проводник (Диспетчер задач → Проводник → "
+                             L"Перезапустить) и запустите injector.exe ещё раз.",
+                             L"Could not inject the widget into Explorer.\n\n"
+                             L"Restart Explorer (Task Manager → Windows Explorer → Restart) "
+                             L"and run injector.exe again." },
 };
 
-static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::HideWidget) + 1,
+static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::InjectFailedText) + 1,
               "таблица строк разошлась с enum Str");
 
 Lang g_lang = Lang::En;
@@ -163,6 +170,10 @@ bool L10n::IsRussian() {
 
 const wchar_t* L10n::LanguageCode() {
     return (g_lang == Lang::Ru) ? L"ru" : L"en";
+}
+
+const wchar_t* L10n::LocaleName() {
+    return (g_lang == Lang::Ru) ? L"ru-RU" : L"en-US";
 }
 
 std::wstring L10n::Remaining(int minutes) {

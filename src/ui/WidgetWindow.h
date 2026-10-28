@@ -2,9 +2,12 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <atomic>
 #include <string>
+#include <thread>
 #include <vector>
 #include "core/AppState.h"
+#include "ui/AppsEdgeProbe.h"
 #include "ui/HeadsetTile.h"
 #include "ui/Renderer.h"
 #include "ui/SlotOverlay.h"
@@ -15,12 +18,13 @@ public:
     bool Create();
     void Destroy();
     void Relayout();
+    void ScheduleRelayout();
     void ForceRestore() const;
     void NotifyTelemetryChanged() const noexcept;
 
     // --- API для второй плитки (HeadsetTile) ---
     [[nodiscard]] bool CanStartDrag() const noexcept;
-    [[nodiscard]] bool ComputeSlotsForDrag(std::vector<RECT>& slots, int& stepDip) const;
+    [[nodiscard]] bool ComputeSlotsForDrag(std::vector<RECT>& slots, int& stepDip);
     [[nodiscard]] int MouseSlot() const noexcept { return m_currentMouseSlot; }
     [[nodiscard]] int StepDip() const noexcept { return m_currentStepDip; }
     [[nodiscard]] bool MenuDark() const noexcept { return IsMenuDark(); }
@@ -30,6 +34,11 @@ public:
     void ShowSlotOverlay(const std::vector<RECT>& slots, int active);
     void UpdateSlotOverlay(int active);
     void HideSlotOverlay();
+    /// Открыто/закрыто контекстное меню любой из плиток: пока оно на экране,
+    /// раскладка окна не двигает, иначе меню «уезжает» от плитки.
+    void SetMenuOpen(bool open) noexcept { m_menuOpen = open; }
+    /// Меню закрылось: обновить раскладку и, если пришёл WM_CLOSE, закрыть окно.
+    void NotifyMenuClosed();
     /// Поменять плитки местами: мышь в mouseSlot, наушники в headsetSlot.
     void SwapTiles(int mouseSlot, int headsetSlot);
     /// «Скрыть виджет» из меню наушников: убрать плитку и остановить опрос.
@@ -50,6 +59,9 @@ private:
     static int LogStructuredException(DWORD code) noexcept;
 
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    /// SEH-обёртка вынесена в отдельный кадр: в функции с __try нельзя держать
+    /// объекты с деструкторами, а C++-исключения ловятся уже снаружи.
+    LRESULT HandleMessageSafe(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) noexcept;
     bool RegisterWindowClass();
     void UnregisterWindowClass();
     void RefreshAnimationState();
@@ -75,12 +87,14 @@ private:
     // подключения Bluetooth-устройства.
     [[nodiscard]] bool ShouldShowHeadsetTile() const;
     void UpdateHeadsetState();
-    void ResumeHeadsetProbe();
+    static bool LoadHeadsetHidden();
+    static void SaveHeadsetHidden(bool hidden);
+    void FinishDiagnosticsReport(HWND hwnd);
 
     // Перетаскивание по панели задач: ячейки считаются по свободной полосе
     // между кнопками приложений и треем, поэтому виджет никогда не ложится
     // на чужие кнопки.
-    bool ComputeSlots(std::vector<RECT>& slots, int& stepDip, bool forceAppsRefresh = false) const;
+    bool ComputeSlots(std::vector<RECT>& slots, int& stepDip, bool forceAppsRefresh = false);
     int StoredSlotIndex(int slotCount, int stepDip) const;
     void StartDrag(HWND hwnd);
     void UpdateDrag(HWND hwnd);
@@ -110,6 +124,7 @@ private:
     bool m_hoverTracking{ false };
     bool m_hoverTimerActive{ false };
     bool m_menuOpen{ false };
+    bool m_exitRequested{ false };  // WM_CLOSE пришёл, пока было открыто меню
     float m_hoverProgress{ 0.0f };
     float m_hoverTarget{ 0.0f };
     ULONGLONG m_hoverLastTick{ 0 };
@@ -119,12 +134,34 @@ private:
     std::vector<RECT> m_lastSlots;          // свободные ячейки на момент последнего Relayout
     bool m_mousePreviewActive{ false };     // мышь временно показана в чужой ячейке
 
+    // События оболочки приходят пачками (и на каждый кадр анимации панели).
+    // Пересчёт склеиваем до 10 раз в секунду и не двигаем окно, если ячейка
+    // не изменилась: SetWindowPos с теми же координатами всё равно будит DWM.
+    ULONGLONG m_lastLayoutTick{ 0 };
+    bool m_layoutDirty{ false };
+    RECT m_lastAppliedRect{};
+    bool m_lastAppliedValid{ false };
+
     bool m_headsetUserHidden{ false };      // «Скрыть виджет» до следующего подключения
+    bool m_headsetStillConnected{ false };  // скрыта, но наушники всё ещё подключены
     bool m_headsetWanted{ false };          // данные есть; места на панели может не хватить
-    bool m_headsetProbeActive{ false };     // после события устройства проверяем, вернулись ли наушники
-    ULONGLONG m_headsetProbeDeadline{ 0 };
     std::uint64_t m_headsetHiddenSinceUnixMs{ 0 };  // данные старше этого момента не считаем свежими
     AirPodsTelemetry m_lastAirPods;         // для точечной перерисовки без мигания
+
+    // Анимация пульсации: включаем при смене состояния и гасим через минуту,
+    // чтобы заряжающаяся мышка не крутила 30 кадров в секунду сутками.
+    bool m_lastNeedAnim{ false };
+    bool m_headsetAnimNeeded{ false };
+    ULONGLONG m_animDeadline{ 0 };
+
+    // Отчёт диагностики собирается в фоновом потоке: HID-дамп и PnP-опрос
+    // занимают секунды и не должны вешать оболочку.
+    std::thread m_reportThread;
+    std::atomic<bool> m_reportBusy{ false };
+    std::atomic<bool> m_reportDone{ false };
+    std::wstring m_reportPath;
+
+    AppsEdgeProbe m_appsEdge;
 
     // Перетаскивание и «магнит» к ячейкам.
     bool m_dragging{ false };

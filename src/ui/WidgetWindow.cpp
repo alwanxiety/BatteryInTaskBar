@@ -36,12 +36,15 @@ constexpr UINT_PTR TIMER_CHECK = 102;
 constexpr UINT_PTR TIMER_HOVER = 103;
 constexpr UINT_PTR TIMER_SNAP  = 104;
 constexpr UINT WM_APP_TELEMETRY = WM_APP + 0x51;
+constexpr UINT WM_APP_REPORT_DONE = WM_APP + 0x52;
+constexpr UINT WM_APP_APPS_EDGE = WM_APP + 0x53;
 
 constexpr wchar_t kAutoRunValueName[] = L"BatteryInTaskBar";
 constexpr wchar_t kUserExitEventName[] = L"Local\\BatteryInTaskBar.Exit";
 constexpr wchar_t kSettingsKey[] = L"Software\\BatteryInTaskBar";
 constexpr wchar_t kThemeValueName[] = L"Theme";
 constexpr wchar_t kPosValueName[] = L"PosOffset";
+constexpr wchar_t kHeadsetHiddenValueName[] = L"HeadsetHidden";
 
 // Геометрия виджета и ячеек в DIP.
 constexpr float kWidgetWidthDip = 168.0f;
@@ -50,6 +53,10 @@ constexpr float kWidgetMarginDip = 4.0f;
 constexpr float kSlotGapDip = 8.0f;
 constexpr int kDragThresholdPx = 3;
 constexpr int kSnapDurationMs = 140;
+// Сколько времени работает пульсация после смены состояния. Дальше плитка
+// остаётся статичной: иначе заряжающаяся мышка рисует 30 кадров в секунду
+// часами и будит GPU Explorer'а.
+constexpr ULONGLONG kPulseWindowMs = 60 * 1000;
 
 enum ZBID : DWORD {
     ZBID_IMMERSIVE_NOTIFICATION = 4
@@ -65,19 +72,33 @@ bool WidgetWindow::Create() {
     m_posOffsetDip = LoadPosOffset();
     // Последние показания — до первого Relayout, чтобы не мелькало «поиск».
     TelemetryCache::Restore();
-    // Вторая плитка не имеет отдельной настройки: она живёт, пока наушники
-    // подключены. Скрыть её можно только из её собственного меню.
-    AppState::Instance().SetAirPodsEnabled(true);
+    // «Скрыть виджет» переживает перезапуск Explorer. Если наушники уже
+    // отключены, флаг снимется при первом же известном состоянии подключения.
+    m_headsetUserHidden = LoadHeadsetHidden();
+    m_headsetStillConnected = m_headsetUserHidden;
+    AppState::Instance().SetAirPodsEnabled(!m_headsetUserHidden);
     AppState::Instance().RequestAirPodsScan();
-    if (!m_renderer.Initialize()) return false;
-    if (!m_slotOverlay.Create(m_hInst)) return false;
+    if (!m_renderer.Initialize()) {
+        Diag::Log(L"widget: Direct2D/DirectWrite init failed");
+        return false;
+    }
+    if (!m_slotOverlay.Create(m_hInst)) {
+        Diag::Log(L"widget: slot overlay class registration failed");
+        return false;
+    }
     // Плитка наушников не критична: если её окно не создалось, мышь всё равно работает.
     m_headset.Create(m_hInst);
 
     m_hTaskbarWnd = WindowScanner::FindTaskbarWindow();
-    if (!m_hTaskbarWnd) return false;
+    if (!m_hTaskbarWnd) {
+        Diag::Log(L"widget: Shell_TrayWnd not found");
+        return false;
+    }
 
-    if (!RegisterWindowClass()) return false;
+    if (!RegisterWindowClass()) {
+        Diag::Log(L"widget: window class registration failed");
+        return false;
+    }
 
     m_hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -88,6 +109,7 @@ bool WidgetWindow::Create() {
     );
 
     if (!m_hwnd) {
+        Diag::Log(L"widget: CreateWindowExW failed, error=%lu", GetLastError());
         UnregisterWindowClass();
         return false;
     }
@@ -125,12 +147,18 @@ bool WidgetWindow::Create() {
     }
 
     SetTimer(m_hwnd, TIMER_CHECK, 500, nullptr);
+    m_appsEdge.Start(m_hTaskbarWnd, m_hwnd, WM_APP_APPS_EDGE);
     Relayout();
     return true;
 }
 
 void WidgetWindow::Destroy() {
     CancelDrag();
+    // Отчёт и UIA-опрос идут в своих потоках: сначала останавливаем их, потом
+    // разрушаем окна, чтобы никто не отправил сообщение в мёртвый hwnd.
+    if (m_reportThread.joinable()) m_reportThread.join();
+    m_reportBusy = false;
+    m_appsEdge.Stop();
     m_headset.Destroy();
     m_slotOverlay.Destroy();
     if (m_hEventHookForeground) { UnhookWinEvent(m_hEventHookForeground); m_hEventHookForeground = nullptr; }
@@ -178,8 +206,21 @@ void WidgetWindow::UnregisterWindowClass() {
     if (m_className.empty()) return;
     // Снимаем регистрацию своей же загрузки: иначе класс с «мёртвым» WndProc
     // переживёт выгрузку DLL.
-    UnregisterClassW(m_className.c_str(), m_hInst);
+    if (!UnregisterClassW(m_className.c_str(), m_hInst)) {
+        Diag::Log(L"widget: UnregisterClass failed, error=%lu", GetLastError());
+    }
     m_className.clear();
+}
+
+void WidgetWindow::ScheduleRelayout() {
+    const ULONGLONG now = GetTickCount64();
+    if (m_lastLayoutTick != 0 && now >= m_lastLayoutTick && now - m_lastLayoutTick < 100) {
+        m_layoutDirty = true;
+        return;
+    }
+    m_layoutDirty = false;
+    m_lastLayoutTick = now;
+    Relayout();
 }
 
 void WidgetWindow::Relayout() {
@@ -192,10 +233,15 @@ void WidgetWindow::Relayout() {
         CancelDrag();
         m_headset.CancelDrag();
         if (IsWindowVisible(m_hwnd)) ShowWindow(m_hwnd, SW_HIDE);
+        m_lastAppliedValid = false;
         m_headset.Relayout({}, 0, 0, false);
         RefreshAnimationState();
         return;
     }
+
+    // Пока открыто меню, окна не двигаем: иначе меню остаётся на месте,
+    // а плитка «уезжает» из-под него. После закрытия меню Relayout вызовут явно.
+    if (m_menuOpen) return;
 
     // Пока идёт перетаскивание или магнитная доводка, позицией управляют они.
     if (m_dragging || m_snapping) return;
@@ -253,8 +299,14 @@ void WidgetWindow::Relayout() {
     m_lastSlots = slots;
     // При предпросмотре обмена мышь уже стоит в чужой ячейке — не дёргаем её.
     if (!m_mousePreviewActive) {
-        SetWindowPos(m_hwnd, HWND_TOPMOST, xPos, yPos, widgetWidth, widgetHeight,
-                     SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+        const RECT target{ xPos, yPos, xPos + widgetWidth, yPos + widgetHeight };
+        const bool sameRect = m_lastAppliedValid && EqualRect(&target, &m_lastAppliedRect);
+        if (!sameRect || !IsWindowVisible(m_hwnd)) {
+            SetWindowPos(m_hwnd, HWND_TOPMOST, xPos, yPos, widgetWidth, widgetHeight,
+                         SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+        }
+        m_lastAppliedRect = target;
+        m_lastAppliedValid = true;
     }
 
     // Вторая плитка — отдельное окно: двигается независимо и не перекрывает
@@ -315,81 +367,9 @@ std::uint64_t NowUnixMs() {
             std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
-struct AppsEdgeCache {
-    ULONGLONG tick{ 0 };
-    int right{ 0 };
-    bool valid{ false };
-};
-
-AppsEdgeCache g_appsEdgeCache;
-
-// Правый край кнопок приложений по данным UI Automation. Legacy-окна Win11
-// (ReBarWindow32 / MSTaskSwWClass) не отражают реальную XAML-раскладку: при
-// большом числе окон кнопки уходят дальше, и ячейки наезжали на них.
-int QueryAppsEdge(HWND taskbar, const RECT& tb, const RECT& tray, bool force) {
-    const ULONGLONG now = GetTickCount64();
-    if (!force && g_appsEdgeCache.valid && now - g_appsEdgeCache.tick < 3000) {
-        return g_appsEdgeCache.right;
-    }
-
-    static const bool comReady = [] {
-        const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        return SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE || hr == S_FALSE;
-    }();
-    if (!comReady) return g_appsEdgeCache.valid ? g_appsEdgeCache.right : 0;
-
-    using Microsoft::WRL::ComPtr;
-    static ComPtr<IUIAutomation> automation;
-    if (!automation) {
-        if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                                    IID_PPV_ARGS(&automation)))) {
-            return g_appsEdgeCache.valid ? g_appsEdgeCache.right : 0;
-        }
-        // Ограничиваем ожидание: зависший провайдер не должен подвесить виджет.
-        ComPtr<IUIAutomation2> automation2;
-        if (SUCCEEDED(automation.As(&automation2))) {
-            automation2->put_ConnectionTimeout(400);
-            automation2->put_TransactionTimeout(800);
-        }
-    }
-
-    int best = 0;
-    ComPtr<IUIAutomationElement> root;
-    if (SUCCEEDED(automation->ElementFromHandle(taskbar, &root)) && root) {
-        VARIANT type{};
-        type.vt = VT_I4;
-        type.lVal = UIA_ButtonControlTypeId;
-        ComPtr<IUIAutomationCondition> condition;
-        if (SUCCEEDED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type,
-                                                          &condition)) &&
-            condition) {
-            ComPtr<IUIAutomationElementArray> elements;
-            if (SUCCEEDED(root->FindAll(TreeScope_Descendants, condition.Get(), &elements)) &&
-                elements) {
-                int length = 0;
-                elements->get_Length(&length);
-                for (int i = 0; i < length; ++i) {
-                    ComPtr<IUIAutomationElement> element;
-                    if (FAILED(elements->GetElement(i, &element)) || !element) continue;
-
-                    RECT rc{};
-                    if (FAILED(element->get_CurrentBoundingRectangle(&rc))) continue;
-                    if (rc.right <= rc.left || rc.bottom <= rc.top) continue;
-                    if (rc.right > tray.left) continue;                        // трей и правее
-                    if (rc.bottom <= tb.top || rc.top >= tb.bottom) continue;  // не в панели
-                    best = std::max(best, static_cast<int>(rc.right));
-                }
-            }
-        }
-    }
-
-    if (best > 0) g_appsEdgeCache = { now, best, true };
-    return best > 0 ? best : (g_appsEdgeCache.valid ? g_appsEdgeCache.right : 0);
-}
-
 }  // namespace
 
-bool WidgetWindow::ComputeSlots(std::vector<RECT>& slots, int& stepDip, bool forceAppsRefresh) const {
+bool WidgetWindow::ComputeSlots(std::vector<RECT>& slots, int& stepDip, bool forceAppsRefresh) {
     slots.clear();
     stepDip = 0;
     if (!m_hwnd || !m_hTaskbarWnd || !IsWindow(m_hTaskbarWnd)) return false;
@@ -417,12 +397,17 @@ bool WidgetWindow::ComputeSlots(std::vector<RECT>& slots, int& stepDip, bool for
 
     // По умолчанию — одна ячейка у трея; расширяем влево до кнопок приложений.
     int leftBound = rightEdge - widgetW;
-    const int appsRight = QueryAppsEdge(m_hTaskbarWnd, rcTb, rcTray, forceAppsRefresh);
-    if (appsRight > 0 && appsRight < rcTray.left) {
-        // Ячейка, которая хотя бы на пиксель заходит на кнопки, отбрасывается:
-        // leftBound — самый левый допустимый край.
-        leftBound = std::min(leftBound, appsRight + gap);
-        leftBound = std::max(leftBound, static_cast<int>(rcTb.left) + margin);
+    int appsRight = 0;
+    if (forceAppsRefresh) m_appsEdge.RequestRefresh();
+    // Снимок снимается в фоновом потоке: UIA на UI-потоке Explorer подвешивал
+    // оболочку на сотни миллисекунд при каждом пересчёте.
+    if (m_appsEdge.Get(rcTb, rcTray, 120000, appsRight)) {
+        if (appsRight > 0 && appsRight < rcTray.left) {
+            // Ячейка, которая хотя бы на пиксель заходит на кнопки, отбрасывается:
+            // leftBound — самый левый допустимый край.
+            leftBound = std::min(leftBound, appsRight + gap);
+            leftBound = std::max(leftBound, static_cast<int>(rcTb.left) + margin);
+        }
     }
 
     const int step = widgetW + gap;
@@ -511,6 +496,7 @@ void WidgetWindow::UpdateDrag(HWND hwnd) {
                  SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 
     const int active = NearestSlot(left + width / 2);
+    m_lastAppliedValid = false;
     if (active != m_dragActive) {
         m_dragActive = active;
         m_slotOverlay.SetActive(active, IsMenuDark());
@@ -601,6 +587,7 @@ void WidgetWindow::TickSnap(HWND hwnd) {
                   static_cast<int>(std::lround((m_snapTo.top - m_snapFrom.top) * eased));
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0,
                  SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    m_lastAppliedValid = false;
 
     if (t >= 1.0f) {
         KillTimer(hwnd, TIMER_SNAP);
@@ -641,6 +628,30 @@ void WidgetWindow::SavePosOffset(int dip) {
     RegCloseKey(hKey);
 }
 
+bool WidgetWindow::LoadHeadsetHidden() {
+    HKEY hKey;
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+    const LONG result = RegQueryValueExW(hKey, kHeadsetHiddenValueName, nullptr, &type,
+                                         reinterpret_cast<LPBYTE>(&value), &size);
+    RegCloseKey(hKey);
+    return result == ERROR_SUCCESS && type == REG_DWORD && value != 0;
+}
+
+void WidgetWindow::SaveHeadsetHidden(bool hidden) {
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr,
+                        &hKey, nullptr) != ERROR_SUCCESS) return;
+    const DWORD value = hidden ? 1 : 0;
+    RegSetValueExW(hKey, kHeadsetHiddenValueName, 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&value), sizeof(value));
+    RegCloseKey(hKey);
+}
+
 bool WidgetWindow::ShouldShowHeadsetTile() const {
     if (m_headsetUserHidden) return false;
     if (!m_headset.Hwnd()) return false;  // окно не создалось — нечего показывать
@@ -660,6 +671,33 @@ bool WidgetWindow::ShouldShowHeadsetTile() const {
 void WidgetWindow::UpdateHeadsetState() {
     if (!m_hwnd) return;
     const AirPodsTelemetry pods = AppState::Instance().GetAirPods();
+
+    // «Скрыть виджет» держится до следующего реального подключения. Пока
+    // наушники подключены, флаг не снимаем; как только вотчер сообщил об
+    // отключении — скрытие больше не нужно, следующее подключение покажет
+    // плитку снова. Никакие WM_DEVICECHANGE его не «воскрешают».
+    if (m_headsetUserHidden) {
+        if (pods.connectionKnown) {
+            if (pods.connected) {
+                m_headsetStillConnected = true;
+            } else if (m_headsetStillConnected) {
+                m_headsetStillConnected = false;
+                m_headsetUserHidden = false;
+                SaveHeadsetHidden(false);
+                Diag::Log(L"headset: disconnected while hidden, taking the tile back");
+            }
+        }
+        m_lastAirPods = pods;
+        return;
+    }
+
+    // Пока плитка скрыта вручную, скан выключен. Как только вотчер увидит
+    // подключение, включаем его снова, чтобы получить свежий заряд.
+    if (pods.connected && !AppState::Instance().IsAirPodsEnabled()) {
+        AppState::Instance().SetAirPodsEnabled(true);
+        AppState::Instance().RequestAirPodsScan();
+    }
+
     const bool wanted = ShouldShowHeadsetTile();
 
     // Сравниваем именно «данные есть», а не «плитка стоит»: если места на
@@ -677,43 +715,19 @@ void WidgetWindow::UpdateHeadsetState() {
     } else {
         m_lastAirPods = pods;
     }
-
-    if (m_headsetProbeActive) {
-        if (pods.hasData && pods.connected) {
-            m_headsetProbeActive = false;
-        } else if (GetTickCount64() > m_headsetProbeDeadline) {
-            // Устройство подключилось, но это были не наушники: снова замолкаем.
-            m_headsetProbeActive = false;
-            m_headsetUserHidden = true;
-            m_headsetWanted = false;
-            AppState::Instance().SetAirPodsEnabled(false);
-            Relayout();
-        }
-    }
-}
-
-void WidgetWindow::ResumeHeadsetProbe() {
-    if (!m_headsetUserHidden || m_headsetProbeActive) return;
-    // Скрытую плитку не опрашиваем. Любое изменение дерева устройств — повод
-    // один раз проверить, не вернулись ли наушники; если нет, через 90 с
-    // снова прекращаем сканирование.
-    m_headsetUserHidden = false;
-    m_headsetProbeActive = true;
-    m_headsetProbeDeadline = GetTickCount64() + 90 * 1000;
-    AppState::Instance().SetAirPodsEnabled(true);
-    AppState::Instance().RequestAirPodsScan();
 }
 
 void WidgetWindow::HideHeadsetTile() {
     if (m_headsetUserHidden) return;
     m_headsetUserHidden = true;
     m_headsetWanted = false;
-    m_headsetProbeActive = false;
+    const AirPodsTelemetry pods = AppState::Instance().GetAirPods();
+    // Если состояние неизвестно, считаем, что наушники подключены: скрытие
+    // не должно сниматься первым же «пустым» опросом.
+    m_headsetStillConnected = pods.connectionKnown ? pods.connected : true;
     m_headsetHiddenSinceUnixMs = NowUnixMs();
+    SaveHeadsetHidden(true);
     AppState::Instance().SetAirPodsEnabled(false);
-    // Старые показания не должны выглядеть свежими после возобновления.
-    AppState::Instance().UpdateAirPods(AirPodsTelemetry{});
-    m_lastAirPods = {};
     m_headset.CancelDrag();
     Relayout();
 }
@@ -723,7 +737,7 @@ bool WidgetWindow::CanStartDrag() const noexcept {
            !IsFullscreenAppActive() && IsTaskbarShowing();
 }
 
-bool WidgetWindow::ComputeSlotsForDrag(std::vector<RECT>& slots, int& stepDip) const {
+bool WidgetWindow::ComputeSlotsForDrag(std::vector<RECT>& slots, int& stepDip) {
     return ComputeSlots(slots, stepDip, true);
 }
 
@@ -748,11 +762,13 @@ void WidgetWindow::PreviewMouseToSlot(int slot) {
                  cell.right - cell.left, cell.bottom - cell.top,
                  SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
     m_mousePreviewActive = true;
+    m_lastAppliedValid = false;
 }
 
 void WidgetWindow::EndMousePreview() {
     if (!m_mousePreviewActive) return;
     m_mousePreviewActive = false;
+    m_lastAppliedValid = false;
     if (!m_hwnd) return;
     if (m_currentMouseSlot >= 0 && m_currentMouseSlot < static_cast<int>(m_lastSlots.size())) {
         const RECT& cell = m_lastSlots[m_currentMouseSlot];
@@ -774,6 +790,8 @@ void WidgetWindow::SwapTiles(int mouseSlot, int headsetSlot) {
 void WidgetWindow::RefreshAnimationState() {
     if (!m_hwnd || !IsWindow(m_hwnd)) {
         UpdateAnimationTimer(false);
+        m_headsetAnimNeeded = false;
+        m_headset.SetAnimation(false);
         return;
     }
     const bool visible = IsWindowVisible(m_hwnd) != FALSE;
@@ -790,11 +808,28 @@ void WidgetWindow::RefreshAnimationState() {
                          ((pods.leftLevel >= 0 && pods.leftLevel <= 15) ||
                           (pods.rightLevel >= 0 && pods.rightLevel <= 15) ||
                           (pods.caseLevel >= 0 && pods.caseLevel <= 15));
-    const bool needAnim = visible &&
-        ((mouseFresh && (telemetry.isCharging ||
-                         (telemetry.hasData && telemetry.batteryLevel >= 0 && telemetry.batteryLevel <= 15))) ||
-         podsLow);
-    UpdateAnimationTimer(needAnim);
+    const bool mouseLowOrCharging =
+        mouseFresh && (telemetry.isCharging ||
+                       (telemetry.hasData && telemetry.batteryLevel >= 0 &&
+                        telemetry.batteryLevel <= 15));
+    const bool needAnim = visible && (mouseLowOrCharging || podsLow);
+
+    // Пульсация нужна как визуальный сигнал о смене состояния, а не как вечный
+    // источник 30 кадров в секунду. Даём ей минуту после включения.
+    const ULONGLONG now = GetTickCount64();
+    if (needAnim && !m_lastNeedAnim) m_animDeadline = now + kPulseWindowMs;
+    m_lastNeedAnim = needAnim;
+    const bool pulsing = needAnim && now < m_animDeadline;
+
+    UpdateAnimationTimer(pulsing);
+
+    // Вторую плитку перерисовываем только когда пульсирует именно она:
+    // иначе окно наушников мигало кадрами из-за заряжающейся мыши.
+    const bool headsetPulsing = pulsing && podsLow;
+    if (headsetPulsing != m_headsetAnimNeeded) {
+        m_headsetAnimNeeded = headsetPulsing;
+        m_headset.SetAnimation(headsetPulsing);
+    }
 }
 
 void WidgetWindow::NotifyTelemetryChanged() const noexcept {
@@ -812,14 +847,27 @@ LRESULT CALLBACK WidgetWindow::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
 
     if (pThis) {
-        __try {
-            return pThis->HandleMessage(hwnd, msg, wParam, lParam);
-        }
-        __except (LogStructuredException(GetExceptionCode())) {
+        try {
+            return pThis->HandleMessageSafe(hwnd, msg, wParam, lParam);
+        } catch (...) {
+            // C++-исключение (например, bad_alloc) не должно убивать Explorer.
+            try {
+                Diag::Log(L"ui: unhandled C++ exception in message 0x%04X", msg);
+            } catch (...) {
+            }
             return 0;
         }
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+LRESULT WidgetWindow::HandleMessageSafe(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) noexcept {
+    __try {
+        return HandleMessage(hwnd, msg, wParam, lParam);
+    }
+    __except (LogStructuredException(GetExceptionCode())) {
+        return 0;
+    }
 }
 
 void CALLBACK WidgetWindow::StaticWinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
@@ -829,7 +877,7 @@ void CALLBACK WidgetWindow::StaticWinEventProc(HWINEVENTHOOK, DWORD event, HWND 
     if (event == EVENT_OBJECT_LOCATIONCHANGE) {
         // Таскбар или его дочернее окно (TrayNotifyWnd) сдвинулись — пересчитываем позицию.
         if (self->m_hTaskbarWnd && (hwnd == self->m_hTaskbarWnd || IsChild(self->m_hTaskbarWnd, hwnd))) {
-            self->Relayout();
+            self->ScheduleRelayout();
         }
         return;
     }
@@ -859,8 +907,10 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     if (msg == m_wmShellHook && m_wmShellHook != 0) {
         // Оболочка изменилась — возвращаем окна наверх, но не пересчитываем
         // сетку: shell-хук приходит часто, а UI Automation стоит миллисекунды.
+        // Снимок ячеек обновим в фоне, из отдельного потока.
         ForceRestore();
         m_headset.ForceRestore();
+        m_appsEdge.RequestRefresh();
         return 0;
     }
 
@@ -868,6 +918,20 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_APP_TELEMETRY: {
         RefreshAnimationState();
         InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+
+    case WM_APP_REPORT_DONE: {
+        m_reportBusy = false;
+        FinishDiagnosticsReport(hwnd);
+        return 0;
+    }
+
+    case WM_APP_APPS_EDGE: {
+        // Фоновый поток нашёл новый правый край кнопок приложений.
+        if (!m_dragging && !m_snapping && !m_menuOpen && !m_headset.IsDragging()) {
+            Relayout();
+        }
         return 0;
     }
 
@@ -890,6 +954,7 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (fullscreen || !IsTaskbarShowing()) {
                 if (IsWindowVisible(hwnd)) {
                     ShowWindow(hwnd, SW_HIDE);
+                    m_lastAppliedValid = false;
                     m_hoverTracking = false;
                     m_hoverProgress = 0.0f;
                     m_hoverTarget = 0.0f;
@@ -897,6 +962,15 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 m_headset.Relayout({}, 0, 0, false);
             } else if (!IsWindowVisible(hwnd)) {
                 Relayout();
+            } else if (m_layoutDirty) {
+                // Склеенные события оболочки: догоняем раскладку, когда поток
+                // событий утих, а не на каждом кадре анимации панели.
+                const ULONGLONG now = GetTickCount64();
+                if (now - m_lastLayoutTick >= 100) {
+                    m_layoutDirty = false;
+                    m_lastLayoutTick = now;
+                    Relayout();
+                }
             }
             UpdateHeadsetState();
             RefreshAnimationState();
@@ -951,13 +1025,9 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 AppState::Instance().RequestRescan();
             }
             // Наушники подключили/убрали в кейс — проверяем Bluetooth сразу.
-            // Если плитка была скрыта вручную, это единственный сигнал,
-            // по которому опрос вообще возобновляется.
-            if (m_headsetUserHidden) {
-                ResumeHeadsetProbe();
-            } else {
-                // Подключение/отключение Bluetooth-устройства — не ждём
-                // очередного окна сканирования.
+            // Если плитку скрыли вручную, скан не включаем: скрытие снимается
+            // только реальным отключением устройства (см. UpdateHeadsetState).
+            if (!m_headsetUserHidden) {
                 AppState::Instance().RequestAirPodsScan();
             }
         }
@@ -1046,6 +1116,18 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     }
 
     case WM_DESTROY: PostQuitMessage(0); return 0;
+
+    case WM_CLOSE:
+        if (m_menuOpen) {
+            // Нельзя уничтожать окно изнутри вложенного цикла меню: сначала
+            // закрываем меню, а WM_CLOSE повторится в NotifyMenuClosed().
+            CloseActiveMenu();
+            m_exitRequested = true;
+            return 0;
+        }
+        DestroyWindow(hwnd);
+        return 0;
+
     default: break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -1150,7 +1232,7 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
 
     // Пока меню открыто, оно владеет мышью: подсветку плитки гасим,
     // а после закрытия восстанавливаем по фактическому положению курсора.
-    m_menuOpen = true;
+    SetMenuOpen(true);
     if (m_hoverTracking) {
         TRACKMOUSEEVENT cancel{ sizeof(TRACKMOUSEEVENT), TME_CANCEL, hwnd, 0 };
         TrackMouseEvent(&cancel);
@@ -1160,7 +1242,7 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
 
     const UINT chosen = ShowWin11Menu(hInst, hwnd, IsMenuDark(), rc, items);
 
-    m_menuOpen = false;
+    NotifyMenuClosed();
     POINT cursor{};
     if (GetCursorPos(&cursor) && GetWindowRect(hwnd, &rc) && PtInRect(&rc, cursor)) {
         TRACKMOUSEEVENT tme{ sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0 };
@@ -1172,7 +1254,26 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
     if (chosen != 0) PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(chosen, 0), 0);
 }
 
+void WidgetWindow::NotifyMenuClosed() {
+    SetMenuOpen(false);
+    // Пока меню было открыто, раскладка могла измениться (закрылось окно,
+    // пришли данные наушников) — догоняем её сейчас.
+    if (m_hwnd && IsWindow(m_hwnd)) Relayout();
+    if (m_exitRequested && m_hwnd && IsWindow(m_hwnd)) {
+        m_exitRequested = false;
+        // WM_CLOSE пришёл, пока меню было открыто; теперь окно можно закрывать.
+        PostMessageW(m_hwnd, WM_CLOSE, 0, 0);
+    }
+}
+
 void WidgetWindow::ShowDiagnosticsReport(HWND hwnd) {
+    if (!hwnd) return;
+    if (m_reportBusy.exchange(true)) {
+        // Отчёт уже собирается — второй параллельный только нагрузит HID.
+        Diag::Log(L"diagnostics report: already running");
+        return;
+    }
+
     const AppState& state = AppState::Instance();
 
     Report::Snapshot snapshot;
@@ -1186,7 +1287,30 @@ void WidgetWindow::ShowDiagnosticsReport(HWND hwnd) {
     snapshot.lastPollUnixMs = state.LastSuccessUnixMs();
     snapshot.pollTrace = state.GetPollTrace();
 
-    const std::wstring path = Report::Write(hwnd, snapshot);
+    // HID-дамп и PnP-опрос занимают секунды. В UI-потоке Explorer это означало
+    // бы зависшую панель задач, поэтому отчёт пишется в фоне.
+    if (m_reportThread.joinable()) m_reportThread.join();
+    m_reportDone = false;
+    m_reportPath.clear();
+    try {
+        m_reportThread = std::thread([this, snapshot, hwnd] {
+            const std::wstring path = Report::Write(hwnd, snapshot);
+            {
+                m_reportPath = path;
+                m_reportDone.store(true, std::memory_order_release);
+            }
+            PostMessageW(hwnd, WM_APP_REPORT_DONE, 0, 0);
+        });
+    } catch (...) {
+        m_reportBusy = false;
+        MessageBoxW(nullptr, L10n::Get(Str::ReportFailed), L10n::Get(Str::ReportTitle),
+                    MB_ICONERROR | MB_OK);
+    }
+}
+
+void WidgetWindow::FinishDiagnosticsReport(HWND hwnd) {
+    if (!m_reportDone.load(std::memory_order_acquire)) return;
+    const std::wstring path = m_reportPath;
     const std::wstring title = L10n::Get(Str::ReportTitle);
 
     if (path.empty()) {
@@ -1208,7 +1332,11 @@ bool WidgetWindow::IsFullscreenAppActive() const noexcept {
     GetClassNameW(hFore, cls.data(), static_cast<int>(cls.size()));
     if (wcscmp(cls.data(), L"Progman") == 0 || wcscmp(cls.data(), L"WorkerW") == 0) return false;
     RECT rcApp; GetWindowRect(hFore, &rcApp);
-    HMONITOR hMon = MonitorFromWindow(hFore, MONITOR_DEFAULTTONEAREST);
+    // Сверяем с монитором, на котором стоит наша панель задач. Полноэкранная
+    // игра на втором мониторе не должна прятать виджет на первом: Windows сам
+    // прячет панель только того монитора, где открылось приложение.
+    HWND anchor = (m_hTaskbarWnd && IsWindow(m_hTaskbarWnd)) ? m_hTaskbarWnd : hFore;
+    HMONITOR hMon = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(MONITORINFO) };
     if (GetMonitorInfoW(hMon, &mi)) {
         return (rcApp.left <= mi.rcMonitor.left && rcApp.top <= mi.rcMonitor.top &&

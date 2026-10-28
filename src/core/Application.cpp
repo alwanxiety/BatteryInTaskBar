@@ -22,22 +22,21 @@ bool FullscreenPauseRequested() noexcept {
 
 Application::Application(HMODULE hModule) : m_window(hModule) {}
 
-void Application::Run() {
+bool Application::Run() {
     m_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!m_stopEvent) return;
+    if (!m_stopEvent) return true;
 
     if (!m_window.Create()) {
         CloseHandle(m_stopEvent);
         m_stopEvent = nullptr;
-        return;
+        return true;
     }
 
     AirPodsMonitor::Instance().Start();
 
     m_pollingThread = CreateThread(nullptr, 0, StaticPollingThread, this, 0, nullptr);
     if (!m_pollingThread) {
-        Stop();
-        return;
+        return Stop();
     }
 
     MSG msg;
@@ -47,15 +46,16 @@ void Application::Run() {
         DispatchMessageW(&msg);
     }
 
-    Stop();
+    return Stop();
 }
 
-void Application::Stop() {
+bool Application::Stop() {
     if (m_stopEvent) SetEvent(m_stopEvent);
 
-    AirPodsMonitor::Instance().Stop();
+    bool clean = AirPodsMonitor::Instance().Stop();
 
     if (m_pollingThread) {
+        // Поток опроса спит шагами по 100 мс и всегда завершается быстро.
         WaitForSingleObject(m_pollingThread, INFINITE);
         CloseHandle(m_pollingThread);
         m_pollingThread = nullptr;
@@ -68,6 +68,7 @@ void Application::Stop() {
 
     TelemetryCache::SaveFromState();
     m_window.Destroy();
+    return clean;
 }
 
 DWORD WINAPI Application::StaticPollingThread(LPVOID param) {
@@ -75,12 +76,13 @@ DWORD WINAPI Application::StaticPollingThread(LPVOID param) {
 }
 
 DWORD Application::PollingWorker() {
-    DeviceManager manager;
-    bool pendingRescan = false;
-    bool paused = false;
-    int failures = 0;
-    ULONGLONG lastCacheSave = 0;
-    DeviceTelemetry lastCached = AppState::Instance().GetTelemetry();
+    try {
+        DeviceManager manager;
+        bool pendingRescan = false;
+        bool paused = false;
+        int failures = 0;
+        ULONGLONG lastCacheSave = 0;
+        DeviceTelemetry lastCached = AppState::Instance().GetTelemetry();
 
     while (WaitForSingleObject(m_stopEvent, 0) == WAIT_TIMEOUT) {
         // Кэш пишем не чаще раза в 5 минут и сразу при изменении данных:
@@ -167,4 +169,13 @@ DWORD Application::PollingWorker() {
         }
     }
     return 0;
+    } catch (...) {
+        // Любое C++-исключение в потоке иначе вызвало бы std::terminate и
+        // уронило explorer.exe вместе с панелью задач.
+        try {
+            Diag::Log(L"telemetry: polling thread aborted by exception");
+        } catch (...) {
+        }
+        return 0;
+    }
 }

@@ -12,6 +12,15 @@
 struct _HIDP_CAPS;
 typedef _HIDP_CAPS HIDP_CAPS;
 
+/// Прерывание текущего цикла опроса. Провайдеры проверяют флаг внутри своих
+/// переборов (индексы Logitech, повторные команды), чтобы не тратить таймауты,
+/// когда приложение уже ушло в полноэкранный режим. Флаг общий: опрос идёт
+/// одним потоком.
+namespace PollAbort {
+void Set(bool requested) noexcept;
+[[nodiscard]] bool Requested() noexcept;
+}
+
 class IMouseProvider {
 public:
     virtual ~IMouseProvider() = default;
@@ -42,6 +51,9 @@ private:
         // Сглаженный уровень заряда храним как double: целочисленное округление
         // создавало «неподвижную точку» и заряд мог навсегда застрять на одном значении.
         double smoothedLevel = -1.0;
+        // Спящая мышь молчит: повторное перечисление feature-индексов стоит
+        // несколько таймаутов, поэтому после неудачи выдерживаем паузу.
+        ULONGLONG retryDiscoveryTick = 0;
     };
     std::array<BatteryCache, 16> m_cache{};
     BatteryCache* FindCache(uint16_t pid, uint8_t devIdx) noexcept;
