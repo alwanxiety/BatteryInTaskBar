@@ -35,6 +35,7 @@ constexpr UINT_PTR TIMER_ANIM  = 101;
 constexpr UINT_PTR TIMER_CHECK = 102;
 constexpr UINT_PTR TIMER_HOVER = 103;
 constexpr UINT_PTR TIMER_SNAP  = 104;
+constexpr UINT_PTR TIMER_ZORDER = 105;
 constexpr UINT WM_APP_TELEMETRY = WM_APP + 0x51;
 constexpr UINT WM_APP_REPORT_DONE = WM_APP + 0x52;
 constexpr UINT WM_APP_APPS_EDGE = WM_APP + 0x53;
@@ -168,6 +169,7 @@ void WidgetWindow::Destroy() {
         KillTimer(m_hwnd, TIMER_ANIM);
         KillTimer(m_hwnd, TIMER_CHECK);
         KillTimer(m_hwnd, TIMER_HOVER);
+        KillTimer(m_hwnd, TIMER_ZORDER);
         DeregisterShellHookWindow(m_hwnd);
         DestroyWindow(m_hwnd);
         m_hwnd = nullptr;
@@ -1028,6 +1030,21 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 // Возвращаем topmost-порядок; окно при этом не активируется.
                 ForceRestore();
                 m_headset.ForceRestore();
+
+                // Пока курсор над панелью задач (там и появляются превью),
+                // оболочка может переставлять окна чаще — держим порядок 10 раз
+                // в секунду, иначе плитка успевает «утонуть» под панелью.
+                POINT cursor{};
+                RECT taskbarRect{};
+                const bool overTaskbar =
+                    GetCursorPos(&cursor) && GetWindowRect(m_hTaskbarWnd, &taskbarRect) &&
+                    PtInRect(&taskbarRect, cursor);
+                if (overTaskbar) {
+                    SetTimer(hwnd, TIMER_ZORDER, 100, nullptr);
+                } else {
+                    KillTimer(hwnd, TIMER_ZORDER);
+                }
+
                 if (m_layoutDirty) {
                     // Склеенные события оболочки: догоняем раскладку, когда поток
                     // событий утих, а не на каждом кадре анимации панели.
@@ -1043,6 +1060,12 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             RefreshAnimationState();
         } else if (wParam == TIMER_HOVER) {
             TickHover();
+        } else if (wParam == TIMER_ZORDER) {
+            // Курсор над панелью задач: оболочка любит переставлять свои окна.
+            if (IsWindowVisible(hwnd)) {
+                ForceRestore();
+                m_headset.ForceRestore();
+            }
         } else if (wParam == TIMER_SNAP) {
             TickSnap(hwnd);
         }
