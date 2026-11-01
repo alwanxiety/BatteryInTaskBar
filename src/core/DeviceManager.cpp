@@ -68,9 +68,18 @@ bool DeviceManager::EnumerateCandidates() {
         detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
         if (!SetupDiGetDeviceInterfaceDetailW(devInfo, &devData, detailData, requiredSize, nullptr, nullptr)) continue;
 
-        HANDLE hDevice = CreateFileW(detailData->DevicePath, GENERIC_READ | GENERIC_WRITE,
-                                     FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                     FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
+        // HID-коллекции мыши часто открываются только на чтение: система держит
+        // их для ввода. Пробуем RW, затем GENERIC_READ и совсем без прав —
+        // провайдеры, которым нужна запись, просто вернут «нет ответа», а
+        // Compx/Generic смогут прочитать feature/input report.
+        auto openDevice = [&](DWORD access) {
+            return CreateFileW(detailData->DevicePath, access,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                               FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
+        };
+        HANDLE hDevice = openDevice(GENERIC_READ | GENERIC_WRITE);
+        if (hDevice == INVALID_HANDLE_VALUE) hDevice = openDevice(GENERIC_READ);
+        if (hDevice == INVALID_HANDLE_VALUE) hDevice = openDevice(0);
         if (hDevice == INVALID_HANDLE_VALUE) continue;
 
         HIDD_ATTRIBUTES attr = { sizeof(HIDD_ATTRIBUTES) };
@@ -259,9 +268,14 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
 bool DeviceManager::QueryCandidate(const Candidate& candidate, DeviceTelemetry& outTelemetry,
                                    PollAttempt::Failure& failure) {
     failure = PollAttempt::Failure::NoAnswer;
-    HANDLE hDevice = CreateFileW(candidate.path.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                 FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
+    auto openDevice = [&](DWORD access) {
+        return CreateFileW(candidate.path.c_str(), access,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
+    };
+    HANDLE hDevice = openDevice(GENERIC_READ | GENERIC_WRITE);
+    if (hDevice == INVALID_HANDLE_VALUE) hDevice = openDevice(GENERIC_READ);
+    if (hDevice == INVALID_HANDLE_VALUE) hDevice = openDevice(0);
     if (hDevice == INVALID_HANDLE_VALUE) {
         failure = PollAttempt::Failure::Open;
         return false;

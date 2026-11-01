@@ -52,6 +52,17 @@ std::wstring BoolText(bool value) {
     return value ? L"yes" : L"no";
 }
 
+std::wstring HexBytes(const std::vector<std::uint8_t>& bytes) {
+    std::wstring text;
+    wchar_t buffer[4]{};
+    for (const std::uint8_t byte : bytes) {
+        swprintf_s(buffer, L"%02X ", byte);
+        text += buffer;
+    }
+    if (!text.empty()) text.pop_back();
+    return text;
+}
+
 void DumpHidDevices(std::wstring& out) {
     Append(out, L"\r\n=== HID interfaces ===\r\n");
 
@@ -88,11 +99,17 @@ void DumpHidDevices(std::wstring& out) {
         if (!SetupDiGetDeviceInterfaceDetailW(set, &iface, detail, requiredSize, nullptr, &devInfoData)) continue;
 
         // Сначала пробуем с полным доступом (он нужен провайдерам), затем только
-        // на чтение атрибутов: часть системных HID-интерфейсов не пускает иначе.
+        // чтение (часть коллекций мыши система держит read-only), затем без прав
+        // — для атрибутов и дескриптора.
         HANDLE dev = CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE,
                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                                  FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
         bool readable = dev != INVALID_HANDLE_VALUE;
+        if (!readable) {
+            dev = CreateFileW(detail->DevicePath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            readable = dev != INVALID_HANDLE_VALUE;
+        }
         if (!readable) {
             dev = CreateFileW(detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -140,6 +157,26 @@ void DumpHidDevices(std::wstring& out) {
                    static_cast<unsigned>(caps.FeatureReportByteLength));
         } else {
             Append(out, L"  reports: unknown (preparsed data unavailable)\r\n");
+        }
+
+        // Сырые отчёты: без них нельзя добавить поддержку незнакомого
+        // устройства (например, Attack Shark X6 с 262-байтовым feature-отчётом).
+        if (haveCaps && readable) {
+            if (caps.InputReportByteLength > 0 && caps.InputReportByteLength <= 4096) {
+                std::vector<std::uint8_t> input(caps.InputReportByteLength, 0);
+                if (HidD_GetInputReport(dev, input.data(), static_cast<ULONG>(input.size()))) {
+                    Append(out, L"  raw input: %ls\r\n", HexBytes(input).c_str());
+                }
+            }
+            if (caps.FeatureReportByteLength > 0 && caps.FeatureReportByteLength <= 4096) {
+                for (int id = 0; id <= 0x0F; ++id) {
+                    std::vector<std::uint8_t> feature(caps.FeatureReportByteLength, 0);
+                    feature[0] = static_cast<std::uint8_t>(id);
+                    if (HidD_GetFeature(dev, feature.data(), static_cast<ULONG>(feature.size()))) {
+                        Append(out, L"  raw feature 0x%02X: %ls\r\n", id, HexBytes(feature).c_str());
+                    }
+                }
+            }
         }
 
         bool answered = false;

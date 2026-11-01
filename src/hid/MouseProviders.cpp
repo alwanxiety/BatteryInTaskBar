@@ -436,22 +436,53 @@ bool CompxNordicProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTeleme
     // читаем дважды: одинаковый результат — это заряд, случайный отчёт движения
     // дважды одно и то же число не даст.
     auto readOnce = [&](DeviceTelemetry& out) -> bool {
-        std::array<uint8_t, 64> buf{ 0x08 };
-        if (HidD_GetFeature(hDev, buf.data(), 64) || HidD_GetInputReport(hDev, buf.data(), 64)) {
-            // i + 1 читается как признак зарядки, поэтому i ограничен 6 (а не 7).
-            for (size_t i = 1; i + 1 < 8; ++i) {
-                if (buf[i] > 0 && buf[i] <= 100) {
-                    out.batteryLevel = buf[i];
-                    out.isCharging = (buf[i + 1] == 1 || buf[i + 1] == 2);
+        // Feature-отчёт: у части Compx/Nordic заряд лежит в 0x08 (64 байта) или
+        // 0x04 (16 байт). Размер буфера обязан совпадать с объявленным, иначе
+        // HidD_GetFeature вернёт ошибку.
+        if (caps.FeatureReportByteLength >= 8 && caps.FeatureReportByteLength <= 4096) {
+            std::vector<uint8_t> buf(caps.FeatureReportByteLength, 0);
+            buf[0] = 0x08;
+            const bool read = HidD_GetFeature(hDev, buf.data(), static_cast<ULONG>(buf.size())) != FALSE;
+            if (read) {
+                for (size_t i = 1; i + 1 < buf.size() && i < 8; ++i) {
+                    if (buf[i] > 0 && buf[i] <= 100) {
+                        out.batteryLevel = buf[i];
+                        out.isCharging = (buf[i + 1] == 1 || buf[i + 1] == 2);
+                        return true;
+                    }
+                }
+            }
+            if (buf.size() >= 16) {
+                std::fill(buf.begin(), buf.end(), 0);
+                buf[0] = 0x04;
+                if (HidD_GetFeature(hDev, buf.data(), 16) &&
+                    buf[1] > 0 && buf[1] <= 100) {
+                    out.batteryLevel = buf[1];
+                    out.isCharging = (buf[2] == 0x01);
                     return true;
                 }
             }
         }
-        buf.fill(0); buf[0] = 0x04;
-        if (HidD_GetFeature(hDev, buf.data(), 16) && buf[1] > 0 && buf[1] <= 100) {
-            out.batteryLevel = buf[1];
-            out.isCharging = (buf[2] == 0x01);
-            return true;
+
+        // Input-отчёт: у части мышей (например, Attack Shark X6) он 8-байтовый
+        // и открывается только на чтение. Явный признак зарядки есть не всегда,
+        // поэтому последний байт тоже проверяем — но только при стабильном
+        // повторе (см. двойное чтение ниже).
+        if (caps.InputReportByteLength > 0 && caps.InputReportByteLength <= 4096) {
+            std::vector<uint8_t> buf(caps.InputReportByteLength, 0);
+            if (HidD_GetInputReport(hDev, buf.data(), static_cast<ULONG>(buf.size()))) {
+                for (size_t i = 1; i < buf.size() && i < 8; ++i) {
+                    if (buf[i] == 0 || buf[i] > 100) continue;
+                    if (i + 1 < buf.size()) {
+                        if (buf[i + 1] != 1 && buf[i + 1] != 2) continue;
+                        out.isCharging = true;
+                    } else {
+                        out.isCharging = false;
+                    }
+                    out.batteryLevel = buf[i];
+                    return true;
+                }
+            }
         }
         return false;
     };
