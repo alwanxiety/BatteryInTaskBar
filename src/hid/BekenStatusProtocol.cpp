@@ -37,7 +37,8 @@ bool IsBekenModel(std::uint8_t code) noexcept {
 }
 
 bool IsKnownModel(std::uint16_t pid, std::uint8_t code) noexcept {
-    if (pid == 0xFA60) return IsBekenModel(code);
+    // FA60 — донгл, FA61 — кабель; кадры того же семейства.
+    if (pid == 0xFA60 || pid == 0xFA61) return IsBekenModel(code);
     if (pid == 0xFA65) return IsInphicModel(code);
     return false;
 }

@@ -427,7 +427,8 @@ bool RazerProvider::Query(HANDLE hDev, const HIDP_CAPS&, DeviceTelemetry& outDat
 
 // --- BekenStatusProvider ---
 bool BekenStatusProvider::Match(uint16_t vid, uint16_t pid) const noexcept {
-    return vid == 0x1D57 && (pid == 0xFA60 || pid == 0xFA65);
+    // FA60 — 2.4G-донгл, FA61 — USB-кабель, FA65 — Inphic.
+    return vid == 0x1D57 && (pid == 0xFA60 || pid == 0xFA61 || pid == 0xFA65);
 }
 
 bool BekenStatusProvider::MatchDevice(HANDLE, const HIDP_CAPS& caps) noexcept {

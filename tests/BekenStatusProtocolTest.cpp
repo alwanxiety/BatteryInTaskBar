@@ -108,6 +108,20 @@ int main() {
         Check(Parse(0xFA60, frame, reading) && reading.level == 20, "M3 model: level");
     }
 
+    // FA61 — тот же X6, но по USB-кабелю. Кадры, если приходят, того же вида.
+    {
+        const auto frame = Frame({ 0x03, 0x85, 0x40, 0x01, 0x1F });  // 31 %
+        Reading reading;
+        Check(Parse(0xFA61, frame, reading) && reading.level == 31,
+              "FA61 cable: X6 model level");
+    }
+    {
+        const auto frame = Frame({ 0x03, 0x10, 0x40, 0x01, 0x0A });  // 100 %
+        Reading reading;
+        Check(Parse(0xFA61, frame, reading) && reading.level == 100,
+              "FA61 cable: step shape");
+    }
+
     // X11/Inphic: 03 55 40 01 <level>.
     {
         const auto frame = Frame({ 0x03, 0x55, 0x40, 0x01, 0x1F });  // 31%

@@ -24,7 +24,7 @@
 | Logitech (G / Pro, HID++) | HID++ 2.0 feature reports |
 | Razer | vendor feature report `0x07` |
 | Red Square / VXE / ATK / VGN | 17-байтный vendor-отчёт |
-| Attack Shark X6 / X11 / R1 / X3 / M3, Inphic (Beken `1d57:fa60` / `fa65`) | interrupt-IN `03 <модель> 40 …` на коллекции `0x000A:0x0000` |
+| Attack Shark X6 / X11 / R1 / X3 / M3, Inphic (Beken `1d57:fa60` донгл / `fa61` кабель / `fa65`) | interrupt-IN `03 <модель> 40 …` на коллекции `0x000A:0x0000` |
 | Compx / Nordic (Attack Shark и др.) | vendor feature report |
 | Большинство остальных мышей | стандартный HID Battery Strength (`0x06/0x20`) |
 | Устройства, заряд которых знает Windows | PnP `PKEY_BatteryLevel` (HID/USB/BT) |
