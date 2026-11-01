@@ -39,7 +39,8 @@ bool QueryProviderSafe(IMouseProvider& provider, HANDLE hDevice, const HIDP_CAPS
 }
 }
 
-DeviceManager::DeviceManager() : m_providers({ &m_logitech, &m_razer, &m_redSquare, &m_compx, &m_generic }) {}
+DeviceManager::DeviceManager()
+    : m_providers({ &m_logitech, &m_razer, &m_beken, &m_redSquare, &m_compx, &m_generic }) {}
 
 bool DeviceManager::EnumerateCandidates() {
     const std::size_t previousCount = m_candidates.size();

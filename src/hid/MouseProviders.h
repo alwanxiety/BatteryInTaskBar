@@ -76,6 +76,26 @@ public:
     [[nodiscard]] const wchar_t* Name() const noexcept override { return L"Razer"; }
 };
 
+// Beken/Inphic-ресиверы 1d57:fa60 (Attack Shark X6/X11/R1) и 1d57:fa65:
+// заряд приходит сам в interrupt-IN на коллекции 0x000A:0x0000, а не в
+// feature-отчёте. Кадры и их разбор — в BekenStatusProtocol.
+class BekenStatusProvider : public IMouseProvider {
+public:
+    [[nodiscard]] bool Match(uint16_t vid, uint16_t pid) const noexcept override;
+    [[nodiscard]] bool MatchDevice(HANDLE hDev, const HIDP_CAPS& caps) noexcept override;
+    bool Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) override;
+    [[nodiscard]] const wchar_t* Name() const noexcept override { return L"BekenStatus"; }
+private:
+    struct Cache {
+        uint16_t pid = 0;
+        int level = -1;
+        bool charging = false;
+        std::uint8_t model = 0;
+        ULONGLONG tick = 0;
+    };
+    Cache m_cache;
+};
+
 class CompxNordicProvider : public IMouseProvider {
 public:
     [[nodiscard]] bool Match(uint16_t vid, uint16_t) const noexcept override;

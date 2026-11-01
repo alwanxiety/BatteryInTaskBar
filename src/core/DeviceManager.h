@@ -35,10 +35,11 @@ private:
 
     LogitechProvider m_logitech;
     RazerProvider m_razer;
+    BekenStatusProvider m_beken;
     RedSquareProvider m_redSquare;
     CompxNordicProvider m_compx;
     GenericBatteryProvider m_generic;
-    std::array<IMouseProvider*, 5> m_providers;
+    std::array<IMouseProvider*, 6> m_providers;
     std::vector<Candidate> m_candidates;
     std::wstring m_lastGoodPath;          // интерфейс, ответивший в прошлый раз (опрашиваем первым)
     std::size_t m_lastGoodProvider = static_cast<std::size_t>(-1);

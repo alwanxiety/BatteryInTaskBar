@@ -27,6 +27,7 @@ add_library(taskbar_mod SHARED
         src/core/Report.cpp
         src/core/TelemetryCache.cpp
         src/hid/MouseProviders.cpp
+        src/hid/BekenStatusProtocol.cpp
         src/hid/RedSquareProtocol.cpp
         src/core/DeviceManager.cpp
         tools/HidDump.cpp
@@ -55,6 +56,7 @@ add_executable(injector WIN32
         src/core/Localization.cpp
         src/core/Diagnostics.cpp
         src/hid/MouseProviders.cpp
+        src/hid/BekenStatusProtocol.cpp
         src/hid/RedSquareProtocol.cpp
         tools/HidDump.cpp
         res/version_exe.rc
@@ -82,7 +84,8 @@ add_custom_target(sign
         VERBATIM)
 
 # Протокольные тесты без реального устройства: синтетические отчёты ATK/VXE
-# проверяют разбор заряда и отсев отчётов движения.
+# проверяют разбор заряда и отсев отчётов движения, кадры Beken/Inphic —
+# заряд X6/X11 и отсев ACK/DPI-отчётов.
 enable_testing()
 add_executable(provider_protocol_test
         tests/RedSquareProtocolTest.cpp
@@ -90,3 +93,10 @@ add_executable(provider_protocol_test
 target_include_directories(provider_protocol_test PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(provider_protocol_test PRIVATE UNICODE _UNICODE)
 add_test(NAME provider_protocol COMMAND provider_protocol_test)
+
+add_executable(beken_status_protocol_test
+        tests/BekenStatusProtocolTest.cpp
+        src/hid/BekenStatusProtocol.cpp)
+target_include_directories(beken_status_protocol_test PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(beken_status_protocol_test PRIVATE UNICODE _UNICODE)
+add_test(NAME beken_status_protocol COMMAND beken_status_protocol_test)

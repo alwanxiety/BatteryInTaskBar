@@ -1,6 +1,7 @@
 #include "tools/HidDump.h"
 #include "core/AppPaths.h"
 #include "core/Localization.h"
+#include "hid/BekenStatusProtocol.h"
 #include "hid/MouseProviders.h"
 #include "res/app_version.h"
 #include <windows.h>
@@ -63,6 +64,36 @@ std::wstring HexBytes(const std::vector<std::uint8_t>& bytes) {
     return text;
 }
 
+bool ReadOneFrame(HANDLE dev, const HIDP_CAPS& caps, std::vector<std::uint8_t>& frame,
+                  DWORD timeoutMs) {
+    if (caps.InputReportByteLength == 0) return false;
+
+    std::vector<std::uint8_t> buffer(caps.InputReportByteLength, 0);
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    DWORD read = 0;
+    bool ok = false;
+    if (ReadFile(dev, buffer.data(), static_cast<DWORD>(buffer.size()), &read, &ov)) {
+        ok = read > 0;
+    } else if (GetLastError() == ERROR_IO_PENDING) {
+        if (WaitForSingleObject(ov.hEvent, timeoutMs) == WAIT_OBJECT_0) {
+            ok = GetOverlappedResult(dev, &ov, &read, FALSE) != FALSE && read > 0;
+        } else {
+            CancelIoEx(dev, &ov);
+            DWORD ignored = 0;
+            GetOverlappedResult(dev, &ov, &ignored, TRUE);
+        }
+    }
+    CloseHandle(ov.hEvent);
+    if (ok) {
+        buffer.resize(read < buffer.size() ? read : static_cast<DWORD>(buffer.size()));
+        frame = std::move(buffer);
+    }
+    return ok;
+}
+
 void DumpHidDevices(std::wstring& out) {
     Append(out, L"\r\n=== HID interfaces ===\r\n");
 
@@ -76,10 +107,11 @@ void DumpHidDevices(std::wstring& out) {
 
     LogitechProvider logitech;
     RazerProvider razer;
+    BekenStatusProvider beken;
     RedSquareProvider redSquare;
     CompxNordicProvider compx;
     GenericBatteryProvider generic;
-    IMouseProvider* providers[] = { &logitech, &razer, &redSquare, &compx, &generic };
+    IMouseProvider* providers[] = { &logitech, &razer, &beken, &redSquare, &compx, &generic };
 
     int index = 0;
     int matchedTotal = 0;
@@ -176,6 +208,59 @@ void DumpHidDevices(std::wstring& out) {
                         Append(out, L"  raw feature 0x%02X: %ls\r\n", id, HexBytes(feature).c_str());
                     }
                 }
+            }
+        }
+
+        // Beken/Inphic присылает заряд сам в interrupt-IN на 0x000A:0x0000.
+        // Слушаем поток 3 с — это единственный способ увидеть кадры на мыши,
+        // которая не отвечает на feature-запросы.
+        if (haveCaps && caps.UsagePage == 0x000A && caps.Usage == 0x0000 &&
+            caps.InputReportByteLength >= 5 && caps.InputReportByteLength <= 64) {
+            HANDLE listenDev = CreateFileW(
+                detail->DevicePath, GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (listenDev == INVALID_HANDLE_VALUE) {
+                listenDev = CreateFileW(detail->DevicePath, GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
+            }
+            if (listenDev == INVALID_HANDLE_VALUE) {
+                listenDev = CreateFileW(detail->DevicePath, 0,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL, nullptr);
+            }
+            if (listenDev != INVALID_HANDLE_VALUE) {
+                Append(out, L"  listening for status frames (3 s)...\r\n");
+                std::vector<std::uint8_t> previous;
+                int seen = 0;
+                const ULONGLONG deadline = GetTickCount64() + 3000;
+                while (GetTickCount64() < deadline && seen < 8) {
+                    std::vector<std::uint8_t> frame;
+                    if (!ReadOneFrame(listenDev, caps, frame, 300)) continue;
+                    if (frame == previous) continue;  // поток повторяет один и тот же кадр
+                    previous = frame;
+                    BekenStatusProtocol::Reading reading;
+                    const bool isBattery =
+                        BekenStatusProtocol::Parse(attr.ProductID, frame, reading);
+                    std::wstring note;
+                    if (isBattery) {
+                        wchar_t noteBuffer[64]{};
+                        if (reading.level >= 0) {
+                            swprintf_s(noteBuffer, L"  -> %d%%%ls", reading.level,
+                                       reading.charging ? L", charging" : L"");
+                        } else {
+                            swprintf_s(noteBuffer, L"  -> charging (level from previous frame)");
+                        }
+                        note = noteBuffer;
+                    }
+                    Append(out, L"  frame: %ls%ls\r\n", HexBytes(frame).c_str(), note.c_str());
+                    ++seen;
+                }
+                if (seen == 0) Append(out, L"  no frames in the window\r\n");
+                CloseHandle(listenDev);
             }
         }
 

@@ -1,4 +1,5 @@
 #include "hid/MouseProviders.h"
+#include "hid/BekenStatusProtocol.h"
 #include "hid/RedSquareProtocol.h"
 #include <windows.h>
 #include <hidsdi.h>
@@ -159,6 +160,35 @@ void ResetOverlapped(OVERLAPPED& ov) noexcept {
     if (ov.hEvent) ResetEvent(ov.hEvent);
 }
 
+/// Прочитать следующий входной отчёт из потока с таймаутом. Нужен устройствам,
+/// которые присылают заряд сами (Beken/Inphic): HidD_GetInputReport отдаёт
+/// только последний отчёт и не ждёт следующего.
+bool ReadInputFrame(HANDLE dev, const HIDP_CAPS& caps, std::vector<uint8_t>& report,
+                    DWORD timeoutMs) {
+    if (caps.InputReportByteLength == 0) return false;
+
+    std::vector<uint8_t> buffer(caps.InputReportByteLength, 0);
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    DWORD read = 0;
+    bool ok = false;
+    if (ReadFile(dev, buffer.data(), static_cast<DWORD>(buffer.size()), &read, &ov)) {
+        ok = read > 0;
+    } else if (GetLastError() == ERROR_IO_PENDING) {
+        ok = WaitForIo(dev, ov, timeoutMs, read) && read > 0;
+    }
+    // После WaitForIo отмена уже дождалась завершения, поэтому и OVERLAPPED,
+    // и буфер можно освобождать.
+    CloseHandle(ov.hEvent);
+    if (ok) {
+        buffer.resize(std::min<DWORD>(read, static_cast<DWORD>(buffer.size())));
+        report = std::move(buffer);
+    }
+    return ok;
+}
+
 bool ReadInputReport(HANDLE dev, const HIDP_CAPS& caps, UCHAR reportId,
                      std::vector<uint8_t>& report) {
     if (caps.InputReportByteLength == 0) return false;
@@ -169,27 +199,7 @@ bool ReadInputReport(HANDLE dev, const HIDP_CAPS& caps, UCHAR reportId,
     if (HidD_GetInputReport(dev, report.data(), static_cast<ULONG>(report.size()))) return true;
 
     // Остальные — только потоком; ждём недолго, опрос не должен залипать.
-    std::vector<uint8_t> buffer(caps.InputReportByteLength, 0);
-    buffer[0] = reportId;
-    OVERLAPPED ov{};
-    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!ov.hEvent) return false;
-
-    DWORD read = 0;
-    bool ok = false;
-    if (ReadFile(dev, buffer.data(), static_cast<DWORD>(buffer.size()), &read, &ov)) {
-        ok = read > 0;
-    } else if (GetLastError() == ERROR_IO_PENDING) {
-        ok = WaitForIo(dev, ov, 150, read) && read > 0;
-    }
-    // После WaitForIo отмена уже дождалась завершения, поэтому и OVERLAPPED,
-    // и буфер можно освобождать.
-    CloseHandle(ov.hEvent);
-    if (ok) {
-        buffer.resize(std::min<DWORD>(read, static_cast<DWORD>(buffer.size())));
-        report = std::move(buffer);
-    }
-    return ok;
+    return ReadInputFrame(dev, caps, report, 150);
 }
 
 }  // namespace
@@ -415,6 +425,84 @@ bool RazerProvider::Query(HANDLE hDev, const HIDP_CAPS&, DeviceTelemetry& outDat
     return false;
 }
 
+// --- BekenStatusProvider ---
+bool BekenStatusProvider::Match(uint16_t vid, uint16_t pid) const noexcept {
+    return vid == 0x1D57 && (pid == 0xFA60 || pid == 0xFA65);
+}
+
+bool BekenStatusProvider::MatchDevice(HANDLE, const HIDP_CAPS& caps) noexcept {
+    // Коллекция, куда вендорское ПО и открытые драйверы слушают interrupt-IN.
+    // Мышиная коллекция 0x0001:0x0002 сюда не попадает: её отчёты — движение,
+    // а не заряд.
+    return caps.UsagePage == 0x000A && caps.Usage == 0x0000 &&
+           caps.InputReportByteLength >= 5 && caps.InputReportByteLength <= 64;
+}
+
+bool BekenStatusProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) {
+    if (!MatchDevice(hDev, caps)) return false;
+    HIDD_ATTRIBUTES attr{ sizeof(HIDD_ATTRIBUTES) };
+    if (!HidD_GetAttributes(hDev, &attr) || !Match(attr.VendorID, attr.ProductID)) return false;
+
+    const uint16_t pid = attr.ProductID;
+    auto accept = [&](const BekenStatusProtocol::Reading& reading, uint8_t model) -> bool {
+        if (m_cache.pid != pid) m_cache = Cache{ pid };
+        if (reading.level >= 0) {
+            m_cache.level = reading.level;
+            m_cache.charging = reading.charging;
+            m_cache.tick = GetTickCount64();
+        } else if (m_cache.level >= 0) {
+            // Кадр «на кабеле» без уровня: оставляем последний известный, но
+            // продлеваем свежесть — мышь жива и говорит.
+            m_cache.charging = reading.charging;
+            m_cache.tick = GetTickCount64();
+        }
+        if (m_cache.level < 0) return false;
+
+        m_cache.model = model;
+        outData.batteryLevel = m_cache.level;
+        outData.isCharging = m_cache.charging;
+        outData.voltageMv = -1;
+        outData.hasData = true;
+        if (pid == 0xFA60) {
+            outData.deviceName = (model == 0x10) ? L"Attack Shark X6" : L"Attack Shark X11";
+        } else {
+            outData.deviceName = L"Inphic In9 Pro";
+        }
+        return true;
+    };
+
+    // Кадры приходят сами примерно раз в 1.5–2 с. Слушаем окно с запасом, но
+    // не дольше: опрос идёт в фоновом потоке, а полный цикл и так нечастый.
+    constexpr DWORD kReadTimeoutMs = 250;
+    constexpr ULONGLONG kListenWindowMs = 2400;
+    const ULONGLONG deadline = GetTickCount64() + kListenWindowMs;
+    std::vector<uint8_t> frame;
+    while (GetTickCount64() < deadline && !PollAbort::Requested()) {
+        if (!ReadInputFrame(hDev, caps, frame, kReadTimeoutMs)) continue;
+        BekenStatusProtocol::Reading reading;
+        if (!BekenStatusProtocol::Parse(pid, frame, reading)) continue;
+        if (accept(reading, frame[1])) return true;
+    }
+
+    // Свежий кадр не пришёл (мышь спит или мы между кадрами): показываем
+    // последний известный уровень, но не дольше 90 с — потом плитка гаснет.
+    if (m_cache.pid == pid && m_cache.level >= 0 &&
+        GetTickCount64() - m_cache.tick <= 90000) {
+        outData.batteryLevel = m_cache.level;
+        outData.isCharging = m_cache.charging;
+        outData.voltageMv = -1;
+        outData.hasData = true;
+        if (pid == 0xFA60) {
+            outData.deviceName = (m_cache.model == 0x10) ? L"Attack Shark X6"
+                                                         : L"Attack Shark X11";
+        } else {
+            outData.deviceName = L"Inphic In9 Pro";
+        }
+        return true;
+    }
+    return false;
+}
+
 // --- CompxNordicProvider ---
 bool CompxNordicProvider::Match(uint16_t vid, uint16_t) const noexcept {
     // Compx/Nordic-ресиверы: VXE/ATK, часть Attack Shark, VGN, Glorious и др.
@@ -464,11 +552,12 @@ bool CompxNordicProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTeleme
             }
         }
 
-        // Input-отчёт: у части мышей (например, Attack Shark X6) он 8-байтовый
-        // и открывается только на чтение. Явный признак зарядки есть не всегда,
-        // поэтому последний байт тоже проверяем — но только при стабильном
-        // повторе (см. двойное чтение ниже).
-        if (caps.InputReportByteLength > 0 && caps.InputReportByteLength <= 4096) {
+        // Input-отчёт: только на vendor-страницах. На стандартной мышиной
+        // коллекции (0x0001) это поток движения, а не заряд: байты X/Y легко
+        // попадают в 1..100 и дают ложные проценты. У Attack Shark X6 заряд
+        // приходит отдельным interrupt-IN на 0x000A:0x0000 (BekenStatus).
+        if (caps.UsagePage != 0x0001 &&
+            caps.InputReportByteLength > 0 && caps.InputReportByteLength <= 4096) {
             std::vector<uint8_t> buf(caps.InputReportByteLength, 0);
             if (HidD_GetInputReport(hDev, buf.data(), static_cast<ULONG>(buf.size()))) {
                 for (size_t i = 1; i < buf.size() && i < 8; ++i) {
