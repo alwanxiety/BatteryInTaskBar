@@ -1372,6 +1372,9 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
     footer.checkId = IDM_UPDATE_CHECK;
     footer.installId = IDM_UPDATE_INSTALL;
     footer.updateAvailable = updateState.available;
+    footer.onCheck = [hwnd, hInst]() {
+        LaunchUpdater(hwnd, hInst, L"--check-silent");
+    };
     items.push_back(std::move(footer));
 
     // Пока меню открыто, оно владеет мышью: подсветку плитки гасим,

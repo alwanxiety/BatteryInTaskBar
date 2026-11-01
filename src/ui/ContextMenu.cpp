@@ -6,6 +6,7 @@
 #include "ui/ContextMenu.h"
 #include "core/Diagnostics.h"
 #include "core/Localization.h"
+#include "core/UpdateState.h"
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
@@ -158,6 +159,9 @@ private:
     int m_hover{ -1 };
     int m_footerHoverButton{ 0 };  // 0 — нет, 1 — проверка, 2 — обновление
     bool m_footerHoverDirty{ false };
+    ULONGLONG m_checkStarted{ 0 };
+    ULONGLONG m_checkLastPoll{ 0 };
+    std::uint64_t m_checkLastSeen{ 0 };
     bool m_hoverFromMouse{ false };
     bool m_escapeDown{ false };
     // Защита от повторного раскрытия подменю, закрытого клавишей: курсор остаётся
@@ -679,6 +683,26 @@ void Win11Menu::Tick() {
         needsPaint = true;
     }
 
+    // Ручная проверка идёт в фоне: меню остаётся открытым, раз в 400 мс
+    // смотрим, не записал ли updater.exe новый результат.
+    const int footer = FooterIndex();
+    if (footer >= 0 && m_items[footer].updateChecking) {
+        const ULONGLONG now = GetTickCount64();
+        if (m_checkLastPoll == 0 || now - m_checkLastPoll >= 400) {
+            m_checkLastPoll = now;
+            const UpdateState::Info state = UpdateState::Read();
+            if (state.checkedAtUnixMs != 0 &&
+                state.checkedAtUnixMs != m_checkLastSeen) {
+                m_items[footer].updateChecking = false;
+                m_items[footer].updateAvailable = state.available;
+                needsPaint = true;
+            } else if (m_checkStarted != 0 && now - m_checkStarted > 15000) {
+                m_items[footer].updateChecking = false;
+                needsPaint = true;
+            }
+        }
+    }
+
     const float smoothing = 1.0f - std::exp(-dt / kHoverTauSeconds);
     for (size_t i = 0; i < m_hoverProgress.size(); ++i) {
         const float target = (static_cast<int>(i) == m_hover) ? 1.0f : 0.0f;
@@ -1095,7 +1119,8 @@ void Win11Menu::DrawFooter(int index, float bodyLeft, float bodyTop,
             DWRITE_MEASURING_MODE_NATURAL);
     };
 
-    drawButton(checkLeft, 1, !item.updateChecking, L"\u21BB");
+    drawButton(checkLeft, 1, !item.updateChecking,
+               item.updateChecking ? L"\u2026" : L"\u21BB");
     drawButton(updateLeft, 2, item.updateAvailable, L"\u2191");
 
     if (item.updateAvailable) {
@@ -1203,7 +1228,18 @@ LRESULT Win11Menu::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (msg == WM_LBUTTONUP) {
             const int footer = FooterIndex();
             if (hit == kHitFooterCheck && footer >= 0) {
-                m_result = m_items[footer].checkId;
+                auto& item = m_items[footer];
+                if (item.updateChecking) return 0;
+                if (item.onCheck) {
+                    item.updateChecking = true;
+                    m_checkStarted = GetTickCount64();
+                    m_checkLastPoll = 0;
+                    m_checkLastSeen = UpdateState::Read().checkedAtUnixMs;
+                    item.onCheck();
+                    m_footerHoverDirty = true;
+                    return 0;
+                }
+                m_result = item.checkId;
                 Dismiss();
                 return 0;
             }

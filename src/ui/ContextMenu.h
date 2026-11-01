@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,8 @@ struct ContextMenuItem {
     UINT installId = 0;
     bool updateAvailable = false;  // синяя точка на кнопке обновления
     bool updateChecking = false;   // проверка уже идёт
+    // Запускает тихую проверку, не закрывая меню. Если пусто — возвращается checkId.
+    std::function<void()> onCheck;
 };
 
 // Показывает меню, растущее от прямоугольника виджета (anchorRect в экранных координатах).
