@@ -1269,8 +1269,12 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
     status.kind = ContextMenuItem::Kind::Info;
     status.text = L10n::Get(Str::Battery);
     if (!telemetry.hasData) status.text += L10n::Get(Str::SearchDevice);
-    else if (telemetry.batteryLevel >= 0) status.text += std::to_wstring(telemetry.batteryLevel) + L"%";
-    else status.text += L10n::Get(Str::NoData);
+    else if (telemetry.batteryLevel >= 0) {
+        status.text += std::to_wstring(telemetry.batteryLevel) + L"%";
+        if (telemetry.levelStale) status.text += L" (?)";
+    } else {
+        status.text += L10n::Get(Str::NoData);
+    }
     if (telemetry.hasData && telemetry.isCharging) status.text += L10n::Get(Str::ChargingSuffix);
     if (telemetry.hasData) {
         // Даже «свежие» данные быстро устаревают, если мышь уснула: показываем,
@@ -1279,6 +1283,13 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
         if (age >= 0) status.text += L" · " + L10n::Ago(age);
     }
     items.push_back(std::move(status));
+
+    if (telemetry.levelStale) {
+        ContextMenuItem stale;
+        stale.kind = ContextMenuItem::Kind::Info;
+        stale.text = L10n::Get(Str::LevelUnchangedHint);
+        items.push_back(std::move(stale));
+    }
 
     if (telemetry.hasData && telemetry.voltageMv > 0) {
         ContextMenuItem voltage;

@@ -72,6 +72,7 @@ void TelemetryCache::Restore() {
     const std::uint64_t now = NowUnixMs();
 
     std::uint64_t mouseSuccess = 0;
+    std::uint64_t levelChangedAt = 0;
     DWORD level = 0;
     DWORD charging = 0;
     DWORD estimate = 0;
@@ -94,7 +95,11 @@ void TelemetryCache::Restore() {
         ReadDword(key, L"MouseVoltage", voltage);
         telemetry.voltageMv = static_cast<int>(voltage);
         telemetry.hasData = true;
-        AppState::Instance().RestoreTelemetry(telemetry, mouseSuccess);
+        // Метка «когда заряд последний раз менялся» переживает перезапуск
+        // Explorer: иначе «(?)» никогда бы не появился у тех, кто часто
+        // перезапускает оболочку.
+        ReadQword(key, L"MouseLevelChangedAt", levelChangedAt);
+        AppState::Instance().RestoreTelemetry(telemetry, mouseSuccess, levelChangedAt);
     }
 
     std::uint64_t headsetSuccess = 0;
@@ -155,6 +160,7 @@ void TelemetryCache::SaveFromState() {
     WriteDword(key, L"MouseVoltage", static_cast<DWORD>(mouse.voltageMv));
     WriteString(key, L"MouseName", mouse.deviceName);
     WriteQword(key, L"MouseLastSuccess", state.LastSuccessUnixMs());
+    WriteQword(key, L"MouseLevelChangedAt", state.LevelChangedAtUnixMs());
 
     WriteDword(key, L"HeadsetHasData", headset.hasData ? 1 : 0);
     WriteDword(key, L"HeadsetLeft", static_cast<DWORD>(headset.leftLevel));

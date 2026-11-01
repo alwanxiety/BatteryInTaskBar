@@ -211,13 +211,19 @@ void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& tel
     // на языке системы, а не пустое место.
     const std::wstring displayName =
         telemetry.deviceName.empty() ? std::wstring(L10n::Get(Str::DeviceGeneric)) : telemetry.deviceName;
+    // «100% (?)» шире обычного «100%»: заранее освобождаем место, иначе
+    // подпись устройства и процент наедут друг на друга.
+    const float percentRight = card.right - kPaddingX * scale;
+    const float percentLeft = card.right - (telemetry.levelStale ? 76.0f : 46.0f) * scale;
+    const float nameRight = percentLeft - 4.0f * scale;
     m_renderTarget->DrawText(displayName.c_str(), static_cast<UINT32>(displayName.length()), m_textFormatDevice.Get(),
-        D2D1::RectF(card.left + kPaddingX * scale, 4.0f * scale, card.right - 48.0f * scale, 19.0f * scale),
+        D2D1::RectF(card.left + kPaddingX * scale, 4.0f * scale, nameRight, 19.0f * scale),
         m_brushTextPrimary.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
     std::wstring percStr = hasLevel ? (std::to_wstring(level) + L"%") : L"…";
+    if (hasLevel && telemetry.levelStale) percStr += L" (?)";
     m_renderTarget->DrawText(percStr.c_str(), static_cast<UINT32>(percStr.length()), m_textFormatPercent.Get(),
-        D2D1::RectF(card.right - 46.0f * scale, 3.5f * scale, card.right - kPaddingX * scale, 19.0f * scale),
+        D2D1::RectF(percentLeft, 3.5f * scale, percentRight, 19.0f * scale),
         m_brushTextPrimary.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
     std::wstring subStr;

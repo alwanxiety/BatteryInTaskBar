@@ -50,6 +50,7 @@ enum class Str {
     HideWidget,         // «Скрыть виджет»
     InjectFailedTitle,  // заголовок ошибки запуска
     InjectFailedText,   // «Не удалось внедрить виджет в Explorer…»
+    LevelUnchangedHint, // «Заряд не менялся больше суток» (залипший индикатор)
 };
 
 namespace L10n {

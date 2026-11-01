@@ -65,9 +65,11 @@ constexpr Entry kStrings[] = {
                              L"Could not inject the widget into Explorer.\n\n"
                              L"Restart Explorer (Task Manager → Windows Explorer → Restart) "
                              L"and run injector.exe again." },
+    /* LevelUnchangedHint */ { L"Заряд не менялся больше суток",
+                               L"Battery level unchanged for over a day" },
 };
 
-static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::InjectFailedText) + 1,
+static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::LevelUnchangedHint) + 1,
               "таблица строк разошлась с enum Str");
 
 Lang g_lang = Lang::En;

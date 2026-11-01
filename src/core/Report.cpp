@@ -229,9 +229,10 @@ std::wstring TelemetryText(const DeviceTelemetry& telemetry) {
     std::wstring text;
     Append(text, L"  device: %ls\r\n",
            telemetry.deviceName.empty() ? L"(unknown)" : telemetry.deviceName.c_str());
-    Append(text, L"  level: %ls  charging: %ls  voltage: %ls  estimate: %ls  hasData: %ls\r\n",
+    Append(text, L"  level: %ls  charging: %ls  voltage: %ls  estimate: %ls  hasData: %ls  levelStale: %ls\r\n",
            level.c_str(), telemetry.isCharging ? L"yes" : L"no", voltage.c_str(),
-           estimate.c_str(), telemetry.hasData ? L"yes" : L"no");
+           estimate.c_str(), telemetry.hasData ? L"yes" : L"no",
+           telemetry.levelStale ? L"yes" : L"no");
     return text;
 }
 

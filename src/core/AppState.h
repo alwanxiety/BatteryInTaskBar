@@ -19,6 +19,9 @@ struct DeviceTelemetry {
     // Был ли хотя бы один успешный опрос. Отличает «данных ещё нет» от «устройство уснуло»:
     // во втором случае показываем последний известный заряд, а не «СПИТ».
     bool hasData = false;
+    // Значение заряда не менялось дольше суток. У части мышей (Attack Shark X6)
+    // индикатор залипает на 100 %; «(?)» напоминает, что цифра может быть не живой.
+    bool levelStale = false;
 
     bool operator==(const DeviceTelemetry&) const = default;
 };
@@ -77,22 +80,46 @@ public:
     /// @return true, если снимок изменился (значит, UI нужно перерисовать)
     bool UpdateTelemetry(const DeviceTelemetry& data) {
         std::unique_lock lock(m_mutex);
-        if (m_telemetry == data) return false;
-        m_telemetry = data;
+        DeviceTelemetry next = data;
+        const bool valueChanged = !m_haveLevelState ||
+                                  next.deviceName != m_telemetry.deviceName ||
+                                  next.batteryLevel != m_telemetry.batteryLevel ||
+                                  next.isCharging != m_telemetry.isCharging;
+        if (valueChanged) {
+            m_haveLevelState = true;
+            m_levelChangedAtUnixMs = NowUnixMs();
+        }
+        next.levelStale = ComputeLevelStale(next);
+        if (m_telemetry == next) return false;
+        m_telemetry = next;
         return true;
     }
 
     [[nodiscard]] DeviceTelemetry GetTelemetry() const {
         std::shared_lock lock(m_mutex);
-        return m_telemetry;
+        DeviceTelemetry telemetry = m_telemetry;
+        // Время могло пройти без нового опроса (мышь спит) — пересчитываем
+        // на лету, чтобы меню и отчёт видели актуальный признак.
+        telemetry.levelStale = ComputeLevelStale(telemetry);
+        return telemetry;
     }
 
     /// Восстановить показания из кэша вместе с исходной меткой времени.
     /// Возраст в меню будет честным, а не «только что».
-    void RestoreTelemetry(const DeviceTelemetry& data, std::uint64_t lastSuccessUnixMs) {
+    void RestoreTelemetry(const DeviceTelemetry& data, std::uint64_t lastSuccessUnixMs,
+                          std::uint64_t levelChangedAtUnixMs = 0) {
         std::unique_lock lock(m_mutex);
         m_telemetry = data;
         m_lastSuccessUnixMs = lastSuccessUnixMs;
+        m_levelChangedAtUnixMs = levelChangedAtUnixMs;
+        m_haveLevelState = levelChangedAtUnixMs != 0;
+        m_telemetry.levelStale = ComputeLevelStale(m_telemetry);
+    }
+
+    /// Когда заряд последний раз реально менялся (мс от epoch), 0 — неизвестно.
+    [[nodiscard]] std::uint64_t LevelChangedAtUnixMs() const {
+        std::shared_lock lock(m_mutex);
+        return m_levelChangedAtUnixMs;
     }
 
     void RequestRescan() noexcept {
@@ -198,16 +225,32 @@ public:
 private:
     AppState() = default;
 
+    /// Через сутки неизменного заряда показываем «(?)»: у X6 индикатор
+    /// залипает на 100 %, а штатная 10-шаговая шкала не должна так долго
+    /// стоять на одном значении при активном использовании.
+    static constexpr std::uint64_t kLevelStaleAfterMs = 24ULL * 60 * 60 * 1000;
+
     static std::uint64_t NowUnixMs() {
         return static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
     }
 
+    /// Вызывается под захваченным m_mutex.
+    [[nodiscard]] bool ComputeLevelStale(const DeviceTelemetry& data) const {
+        if (!data.hasData || data.batteryLevel < 0 || data.isCharging) return false;
+        if (m_levelChangedAtUnixMs == 0) return false;
+        const std::uint64_t now = NowUnixMs();
+        return now >= m_levelChangedAtUnixMs &&
+               now - m_levelChangedAtUnixMs >= kLevelStaleAfterMs;
+    }
+
     mutable std::shared_mutex m_mutex;
     DeviceTelemetry m_telemetry;
     AirPodsTelemetry m_airPods;
     std::uint64_t m_lastSuccessUnixMs{ 0 };
+    std::uint64_t m_levelChangedAtUnixMs{ 0 };
+    bool m_haveLevelState{ false };
     PollTrace m_pollTrace;
     std::atomic<bool> m_forceRescan{ false };
     std::atomic<bool> m_fullscreenApp{ false };
