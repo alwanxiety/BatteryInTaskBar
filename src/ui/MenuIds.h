@@ -13,5 +13,6 @@ constexpr UINT IDM_REPORT = 1006;
 // Меню наушников: обновить только Bluetooth-данные и скрыть вторую плитку.
 constexpr UINT IDM_HEADSET_REFRESH = 1008;
 constexpr UINT IDM_HEADSET_HIDE = 1009;
-// Проверка обновлений через updater.exe.
-constexpr UINT IDM_UPDATE = 1010;
+// Футер меню: проверить обновления и установить найденную версию.
+constexpr UINT IDM_UPDATE_CHECK = 1011;
+constexpr UINT IDM_UPDATE_INSTALL = 1012;

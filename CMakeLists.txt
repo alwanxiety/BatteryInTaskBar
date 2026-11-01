@@ -26,6 +26,7 @@ add_library(taskbar_mod SHARED
         src/core/Diagnostics.cpp
         src/core/Report.cpp
         src/core/TelemetryCache.cpp
+        src/core/UpdateState.cpp
         src/hid/MouseProviders.cpp
         src/hid/BekenStatusProtocol.cpp
         src/hid/RedSquareProtocol.cpp
@@ -75,6 +76,7 @@ add_executable(updater WIN32
         updater.cpp
         src/core/AppPaths.cpp
         src/core/Localization.cpp
+        src/core/UpdateState.cpp
         res/version_updater.rc
 )
 target_include_directories(updater PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR})

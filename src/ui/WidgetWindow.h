@@ -82,7 +82,8 @@ private:
     static void SignalUserExit() noexcept;
     void ShowContextMenu(HWND hwnd, HMODULE hInst);
     void ShowDiagnosticsReport(HWND hwnd);
-    static void LaunchUpdater(HWND hwnd, HMODULE hInst);
+    static void LaunchUpdater(HWND hwnd, HMODULE hInst, const wchar_t* arguments,
+                              bool reportMissing = true);
     void SetHoverTarget(float target);
     void TickHover();
 

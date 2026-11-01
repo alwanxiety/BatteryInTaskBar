@@ -22,6 +22,7 @@
 #include <vector>
 #include "core/AppPaths.h"
 #include "core/Localization.h"
+#include "core/UpdateState.h"
 #include "res/app_version.h"
 #include "ui/WidgetIdentity.h"
 
@@ -108,6 +109,12 @@ std::wstring Utf8ToWide(const std::string& text) {
     MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
                         wide.data(), chars);
     return wide;
+}
+
+std::uint64_t NowUnixMs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 void LogLine(const wchar_t* format, ...) {
@@ -1110,6 +1117,86 @@ bool ApplyUpdate(const std::wstring& installDir, const ReleaseInfo& release,
     return true;
 }
 
+// --- Тихие режимы (виджет не показывает интерфейс обновлятора) -------------
+
+int RunSilentCheck() {
+    HANDLE checkMutex =
+        CreateMutexW(nullptr, FALSE, L"Local\\BatteryInTaskBar.UpdateCheck");
+    if (!checkMutex) return 2;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(checkMutex);
+        return 0;
+    }
+
+    ReleaseInfo release;
+    std::wstring error;
+    const CheckResult result = CheckLatestRelease(release, error);
+
+    UpdateState::Info state;
+    state.checkedAtUnixMs = NowUnixMs();
+    if (result == CheckResult::Available) {
+        state.available = true;
+        state.latest = release.version;
+        LogLine(L"silent check: update available %ls", release.version.c_str());
+    } else if (result == CheckResult::UpToDate) {
+        state.latest = APP_VERSION_WSTRING;
+        LogLine(L"silent check: up to date %ls", APP_VERSION_WSTRING);
+    } else {
+        state.error = error;
+        LogLine(L"silent check failed: %ls", error.c_str());
+    }
+    UpdateState::Write(state);
+
+    CloseHandle(checkMutex);
+    return result == CheckResult::Available ? 1
+         : (result == CheckResult::Error ? 2 : 0);
+}
+
+int RunSilentInstall() {
+    HANDLE installMutex = CreateMutexW(nullptr, FALSE, kUpdaterMutexName);
+    if (!installMutex) return 2;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(installMutex);
+        return 0;
+    }
+
+    ReleaseInfo release;
+    std::wstring error;
+    const CheckResult result = CheckLatestRelease(release, error);
+    if (result != CheckResult::Available) {
+        UpdateState::Info state;
+        state.checkedAtUnixMs = NowUnixMs();
+        state.error = (result == CheckResult::Error) ? error : std::wstring{};
+        state.latest = (result == CheckResult::UpToDate) ? std::wstring(APP_VERSION_WSTRING)
+                                                         : std::wstring{};
+        UpdateState::Write(state);
+        LogLine(L"silent install skipped: %ls",
+                result == CheckResult::Error ? error.c_str() : L"up to date");
+        CloseHandle(installMutex);
+        return result == CheckResult::Error ? 2 : 0;
+    }
+
+    const bool ok = ApplyUpdate(
+        ModuleDirectory(), release, false, false,
+        [](const std::wstring&) {}, error);
+
+    UpdateState::Info state;
+    state.checkedAtUnixMs = NowUnixMs();
+    state.latest = release.version;
+    if (ok) {
+        state.available = false;
+        LogLine(L"silent install: installed %ls", release.version.c_str());
+    } else {
+        state.available = true;
+        state.error = error;
+        LogLine(L"silent install failed: %ls", error.c_str());
+    }
+    UpdateState::Write(state);
+
+    CloseHandle(installMutex);
+    return ok ? 0 : 2;
+}
+
 // --- Окно ------------------------------------------------------------------
 
 HWND g_window = nullptr;
@@ -1393,15 +1480,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_logLockReady = true;
     L10n::Init();
 
+    bool silentCheck = false;
+    bool silentInstall = false;
     for (const std::wstring& arg : CommandLineArgs()) {
         if (_wcsicmp(arg.c_str(), L"--auto") == 0) g_auto = true;
         else if (_wcsicmp(arg.c_str(), L"--no-stop") == 0) g_noStop = true;
         else if (_wcsicmp(arg.c_str(), L"--no-start") == 0) g_noStart = true;
+        else if (_wcsicmp(arg.c_str(), L"--check-silent") == 0) silentCheck = true;
+        else if (_wcsicmp(arg.c_str(), L"--install-silent") == 0) silentInstall = true;
     }
-    LogLine(L"updater start, version=%ls, install=%ls, test=%ls, auto=%d noStop=%d noStart=%d",
+    LogLine(L"updater start, version=%ls, install=%ls, test=%ls, auto=%d noStop=%d noStart=%d silentCheck=%d silentInstall=%d",
             APP_VERSION_WSTRING, ModuleDirectory().c_str(),
             TestReleaseDirectory().c_str(), g_auto ? 1 : 0, g_noStop ? 1 : 0,
-            g_noStart ? 1 : 0);
+            g_noStart ? 1 : 0, silentCheck ? 1 : 0, silentInstall ? 1 : 0);
+
+    if (silentCheck) return RunSilentCheck();
+    if (silentInstall) return RunSilentInstall();
 
     HANDLE instanceMutex = CreateMutexW(nullptr, FALSE, kUpdaterMutexName);
     if (!instanceMutex) return 1;

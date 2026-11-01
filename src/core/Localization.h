@@ -74,6 +74,7 @@ enum class Str {
     UpdateLater,        // «Позже»
     UpdateClose,        // «Закрыть»
     UpdateOpenRelease,  // «Открыть страницу релиза»
+    VersionPrefix,      // «Версия: » в футере меню
 };
 
 namespace L10n {

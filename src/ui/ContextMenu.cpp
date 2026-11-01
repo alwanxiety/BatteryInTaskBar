@@ -41,6 +41,12 @@ constexpr float kBodyPadBottom = 4.0f;
 constexpr float kTitleHeight = 32.0f;
 constexpr float kInfoHeight = 22.0f;
 constexpr float kActionHeight = 30.0f;
+constexpr float kFooterHeight = 34.0f;
+constexpr float kFooterIconSize = 24.0f;
+constexpr float kFooterIconGap = 6.0f;
+constexpr float kFooterRightPad = 8.0f;
+constexpr int kHitFooterCheck = -3;
+constexpr int kHitFooterUpdate = -4;
 constexpr float kMinWidth = 196.0f;
 constexpr float kMinWidthSubmenu = 140.0f;
 constexpr float kMaxWidth = 320.0f;
@@ -118,6 +124,8 @@ private:
     void DrawItemText(int index, const D2D1_RECT_F& rect, const D2D1_COLOR_F& color);
     void DrawCheckmark(float right, float centerY);
     void DrawChevron(float x, float centerY);
+    void DrawFooter(int index, float bodyLeft, float bodyTop, float bodyRight);
+    int FooterIndex() const;
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT SafeHandle(Win11Menu* self, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -148,6 +156,8 @@ private:
     std::vector<ComPtr<IDWriteTextLayout>> m_layouts;
 
     int m_hover{ -1 };
+    int m_footerHoverButton{ 0 };  // 0 — нет, 1 — проверка, 2 — обновление
+    bool m_footerHoverDirty{ false };
     bool m_hoverFromMouse{ false };
     bool m_escapeDown{ false };
     // Защита от повторного раскрытия подменю, закрытого клавишей: курсор остаётся
@@ -179,6 +189,7 @@ private:
     ComPtr<IDWriteTextFormat> m_formatTitle;
     ComPtr<IDWriteTextFormat> m_formatInfo;
     ComPtr<IDWriteTextFormat> m_formatAction;
+    ComPtr<IDWriteTextFormat> m_formatIcon;
     ComPtr<IDWriteInlineObject> m_ellipsis;
     ComPtr<ID2D1SolidColorBrush> m_brush;
     // Круглые концы/стыки для мелких штрихов (галочка) — иначе они выглядят «рвано».
@@ -240,6 +251,9 @@ bool Win11Menu::CreateTextFormats() {
     if (!create(L"Segoe UI Variable Text", 12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, m_formatTitle)) return false;
     if (!create(L"Segoe UI Variable Text", 11.5f, DWRITE_FONT_WEIGHT_NORMAL, m_formatInfo)) return false;
     if (!create(L"Segoe UI Variable Text", 11.5f, DWRITE_FONT_WEIGHT_NORMAL, m_formatAction)) return false;
+    if (!create(L"Segoe UI Symbol", 13.5f, DWRITE_FONT_WEIGHT_NORMAL, m_formatIcon)) return false;
+    m_formatIcon->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    m_formatIcon->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
     return SUCCEEDED(m_dwrite->CreateEllipsisTrimmingSign(m_formatAction.Get(), m_ellipsis.GetAddressOf()));
 }
@@ -279,6 +293,11 @@ void Win11Menu::BuildLayout() {
             width = measureWidth(item.text, m_formatAction.Get()) + kBodyPadX * 2.0f +
                     (NeedsTrailingMark(item) ? 16.0f : 0.0f);
             break;
+        case ContextMenuItem::Kind::Footer:
+            height = kFooterHeight;
+            width = measureWidth(item.text, m_formatInfo.Get()) + kBodyPadX * 2.0f +
+                    kFooterIconSize * 2.0f + kFooterIconGap + kFooterRightPad;
+            break;
         }
         m_itemH.push_back(height);
         widest = std::max(widest, width);
@@ -303,8 +322,11 @@ void Win11Menu::BuildLayout() {
         IDWriteTextFormat* format = m_formatInfo.Get();
         if (item.kind == ContextMenuItem::Kind::Title) format = m_formatTitle.Get();
         else if (item.kind == ContextMenuItem::Kind::Action) format = m_formatAction.Get();
-        const float width = m_contentW - left - kBodyPadX -
-                            (NeedsTrailingMark(item) ? 16.0f : 0.0f);
+        float width = m_contentW - left - kBodyPadX -
+                      (NeedsTrailingMark(item) ? 16.0f : 0.0f);
+        if (item.kind == ContextMenuItem::Kind::Footer) {
+            width -= kFooterIconSize * 2.0f + kFooterIconGap + kFooterRightPad;
+        }
         ComPtr<IDWriteTextLayout> layout;
         if (FAILED(m_dwrite->CreateTextLayout(item.text.c_str(), static_cast<UINT32>(item.text.size()),
                                               format, width, m_itemH[i], layout.GetAddressOf()))) {
@@ -652,6 +674,11 @@ void Win11Menu::Tick() {
         }
     }
 
+    if (m_footerHoverDirty) {
+        m_footerHoverDirty = false;
+        needsPaint = true;
+    }
+
     const float smoothing = 1.0f - std::exp(-dt / kHoverTauSeconds);
     for (size_t i = 0; i < m_hoverProgress.size(); ++i) {
         const float target = (static_cast<int>(i) == m_hover) ? 1.0f : 0.0f;
@@ -739,6 +766,24 @@ int Win11Menu::HitTest(POINT clientPt) const {
         const float top = m_itemTop[i];
         if (y >= top && y < top + m_itemH[i]) {
             return m_items[i].enabled ? static_cast<int>(i) : -2;
+        }
+    }
+
+    const int footer = FooterIndex();
+    if (footer >= 0) {
+        const float top = m_itemTop[footer];
+        if (y >= top && y < top + m_itemH[footer]) {
+            const auto& item = m_items[footer];
+            const float updateLeft =
+                m_contentW - kBodyPadX - kFooterRightPad - kFooterIconSize;
+            const float checkLeft =
+                updateLeft - kFooterIconGap - kFooterIconSize;
+            if (x >= updateLeft && x < updateLeft + kFooterIconSize) {
+                return item.updateAvailable ? kHitFooterUpdate : -2;
+            }
+            if (x >= checkLeft && x < checkLeft + kFooterIconSize) {
+                return item.updateChecking ? -2 : kHitFooterCheck;
+            }
         }
     }
     return -2;  // внутри панели, но не интерактивный пункт
@@ -919,6 +964,11 @@ void Win11Menu::DrawItems() {
         const float top = bodyTop + m_itemTop[i];
         const float height = m_itemH[i];
 
+        if (item.kind == ContextMenuItem::Kind::Footer) {
+            DrawFooter(static_cast<int>(i), bodyLeft, bodyTop, bodyRight);
+            continue;
+        }
+
         if (item.kind == ContextMenuItem::Kind::Action) {
             const float progress = m_hoverProgress[i];
             if (progress > 0.001f) {
@@ -982,6 +1032,89 @@ void Win11Menu::DrawChevron(float x, float centerY) {
     m_renderTarget->DrawLine(p2, p3, m_brush.Get(), 1.4f);
 }
 
+int Win11Menu::FooterIndex() const {
+    for (std::size_t i = 0; i < m_items.size(); ++i) {
+        if (m_items[i].kind == ContextMenuItem::Kind::Footer) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void Win11Menu::DrawFooter(int index, float bodyLeft, float bodyTop,
+                           float bodyRight) {
+    if (index < 0 || index >= static_cast<int>(m_items.size())) return;
+    const auto& item = m_items[index];
+    const float top = bodyTop + m_itemTop[index];
+    const float height = m_itemH[index];
+    const float centerY = top + height * 0.5f;
+
+    const D2D1_COLOR_F primary = m_dark ? MakeColor(1.0f, 1.0f, 1.0f, 0.96f)
+                                        : MakeColor(0.05f, 0.05f, 0.05f, 0.96f);
+    const D2D1_COLOR_F secondary = m_dark ? MakeColor(1.0f, 1.0f, 1.0f, 0.52f)
+                                          : MakeColor(0.35f, 0.35f, 0.35f, 0.72f);
+    const D2D1_COLOR_F hoverColor = m_dark ? MakeColor(1.0f, 1.0f, 1.0f, 0.075f)
+                                           : MakeColor(0.0f, 0.0f, 0.0f, 0.055f);
+
+    // Тонкий разделитель отделяет футер от пунктов меню.
+    m_brush->SetColor(m_dark ? MakeColor(1.0f, 1.0f, 1.0f, 0.07f)
+                             : MakeColor(0.0f, 0.0f, 0.0f, 0.08f));
+    m_renderTarget->DrawLine(D2D1::Point2F(bodyLeft + kBodyPadX, top),
+                             D2D1::Point2F(bodyRight - kBodyPadX, top),
+                             m_brush.Get(), 1.0f);
+
+    DrawItemText(index,
+                 D2D1::RectF(bodyLeft + kBodyPadX, top, bodyRight - kBodyPadX,
+                             top + height),
+                 secondary);
+
+    const float updateLeft =
+        bodyRight - kBodyPadX - kFooterRightPad - kFooterIconSize;
+    const float checkLeft =
+        updateLeft - kFooterIconGap - kFooterIconSize;
+
+    auto drawButton = [&](float left, int hoverButton, bool enabled,
+                          const wchar_t* glyph) {
+        if (m_footerHoverButton == hoverButton && enabled) {
+            m_brush->SetColor(hoverColor);
+            m_renderTarget->FillRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(left, centerY - kFooterIconSize * 0.5f,
+                                left + kFooterIconSize,
+                                centerY + kFooterIconSize * 0.5f),
+                    kRowRadius, kRowRadius),
+                m_brush.Get());
+        }
+        m_brush->SetColor(enabled ? primary : secondary);
+        m_renderTarget->DrawText(
+            glyph, 1, m_formatIcon.Get(),
+            D2D1::RectF(left, centerY - kFooterIconSize * 0.5f,
+                        left + kFooterIconSize,
+                        centerY + kFooterIconSize * 0.5f),
+            m_brush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL);
+    };
+
+    drawButton(checkLeft, 1, !item.updateChecking, L"\u21BB");
+    drawButton(updateLeft, 2, item.updateAvailable, L"\u2191");
+
+    if (item.updateAvailable) {
+        const D2D1_POINT_2F dot{
+            updateLeft + kFooterIconSize - 3.0f,
+            centerY - kFooterIconSize * 0.5f + 3.0f
+        };
+        const D2D1_COLOR_F bodyColor = m_dark ? MakeColor(0.173f, 0.173f, 0.173f)
+                                              : MakeColor(0.976f, 0.976f, 0.976f);
+        m_brush->SetColor(bodyColor);
+        m_renderTarget->FillEllipse(D2D1::Ellipse(dot, 4.0f, 4.0f),
+                                    m_brush.Get());
+        m_brush->SetColor(m_dark ? MakeColor(0.30f, 0.76f, 1.0f)
+                                 : MakeColor(0.0f, 0.47f, 0.83f));
+        m_renderTarget->FillEllipse(D2D1::Ellipse(dot, 2.6f, 2.6f),
+                                    m_brush.Get());
+    }
+}
+
 LRESULT CALLBACK Win11Menu::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     Win11Menu* self = nullptr;
     if (msg == WM_NCCREATE) {
@@ -1038,6 +1171,12 @@ LRESULT Win11Menu::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         m_hoverFromMouse = true;
         const int hit = HitTest(pt);
+        const int footerHover = (hit == kHitFooterCheck) ? 1
+                             : (hit == kHitFooterUpdate) ? 2 : 0;
+        if (footerHover != m_footerHoverButton) {
+            m_footerHoverButton = footerHover;
+            m_footerHoverDirty = true;
+        }
         const int hover = (hit >= 0) ? hit : -1;
         if (hover != m_hover) {
             // Ушли с пункта, раскрывшего подменю, — подменю закрывается.
@@ -1062,6 +1201,17 @@ LRESULT Win11Menu::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         const int hit = HitTest(pt);
         if (msg == WM_LBUTTONUP) {
+            const int footer = FooterIndex();
+            if (hit == kHitFooterCheck && footer >= 0) {
+                m_result = m_items[footer].checkId;
+                Dismiss();
+                return 0;
+            }
+            if (hit == kHitFooterUpdate && footer >= 0) {
+                m_result = m_items[footer].installId;
+                Dismiss();
+                return 0;
+            }
             if (hit >= 0) {
                 Choose(hit);
             } else if (hit == -1) {

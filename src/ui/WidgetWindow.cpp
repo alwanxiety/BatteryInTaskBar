@@ -25,6 +25,8 @@
 #include "core/Localization.h"
 #include "core/Report.h"
 #include "core/TelemetryCache.h"
+#include "core/UpdateState.h"
+#include "res/app_version.h"
 #include "ui/ContextMenu.h"
 #include "ui/MenuIds.h"
 #include "ui/WidgetIdentity.h"
@@ -119,6 +121,10 @@ bool WidgetWindow::Create() {
         return false;
     }
     s_instance = this;
+
+    // Фоновая проверка обновлений при старте: интерфейс обновлятора не
+    // показывается, результат читается из UpdateState при открытии меню.
+    LaunchUpdater(m_hwnd, m_hInst, L"--check-silent", false);
 
     MARGINS margins = { -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(m_hwnd, &margins);
@@ -1209,7 +1215,12 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case IDM_THEME_DARK: ApplyTheme(WidgetTheme::Dark, true); break;
         case IDM_THEME_LIGHT: ApplyTheme(WidgetTheme::Light, true); break;
         case IDM_REPORT: ShowDiagnosticsReport(hwnd); break;
-        case IDM_UPDATE: LaunchUpdater(hwnd, m_hInst); break;
+        case IDM_UPDATE_CHECK:
+            LaunchUpdater(hwnd, m_hInst, L"--check-silent");
+            break;
+        case IDM_UPDATE_INSTALL:
+            LaunchUpdater(hwnd, m_hInst, L"--install-silent", false);
+            break;
         case IDM_EXIT:
             SignalUserExit();
             PostQuitMessage(0);
@@ -1348,15 +1359,20 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
     autoRun.checked = IsAutoRunEnabled();
     items.push_back(std::move(autoRun));
 
-    ContextMenuItem update;
-    update.text = L10n::Get(Str::CheckUpdates);
-    update.id = IDM_UPDATE;
-    items.push_back(std::move(update));
-
     ContextMenuItem exitItem;
     exitItem.text = L10n::Get(Str::CloseWidget);
     exitItem.id = IDM_EXIT;
     items.push_back(std::move(exitItem));
+
+    // Футер в самом низу: версия и две маленькие иконки справа.
+    const UpdateState::Info updateState = UpdateState::Read();
+    ContextMenuItem footer;
+    footer.kind = ContextMenuItem::Kind::Footer;
+    footer.text = std::wstring(L10n::Get(Str::VersionPrefix)) + APP_VERSION_WSTRING;
+    footer.checkId = IDM_UPDATE_CHECK;
+    footer.installId = IDM_UPDATE_INSTALL;
+    footer.updateAvailable = updateState.available;
+    items.push_back(std::move(footer));
 
     // Пока меню открыто, оно владеет мышью: подсветку плитки гасим,
     // а после закрытия восстанавливаем по фактическому положению курсора.
@@ -1636,24 +1652,42 @@ void WidgetWindow::SyncAutoRunCommand(HMODULE hInst) {
     RegCloseKey(hKey);
 }
 
-void WidgetWindow::LaunchUpdater(HWND hwnd, HMODULE hInst) {
+void WidgetWindow::LaunchUpdater(HWND hwnd, HMODULE hInst,
+                                 const wchar_t* arguments, bool reportMissing) {
     const std::wstring directory = WidgetModuleDirectory(hInst);
     const std::wstring updater =
         directory.empty() ? std::wstring{} : directory + L"updater.exe";
     if (updater.empty() ||
         GetFileAttributesW(updater.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        MessageBoxW(hwnd, L10n::Get(Str::UpdateNoUpdater),
-                    L10n::Get(Str::UpdateTitle), MB_ICONINFORMATION | MB_OK);
+        if (reportMissing) {
+            MessageBoxW(hwnd, L10n::Get(Str::UpdateNoUpdater),
+                        L10n::Get(Str::UpdateTitle),
+                        MB_ICONINFORMATION | MB_OK);
+        }
         return;
     }
 
-    const HINSTANCE result = ShellExecuteW(
-        hwnd, L"open", updater.c_str(), nullptr,
-        directory.empty() ? nullptr : directory.c_str(), SW_SHOWNORMAL);
-    if (reinterpret_cast<INT_PTR>(result) <= 32) {
-        MessageBoxW(hwnd, L10n::Get(Str::UpdateNoUpdater),
-                    L10n::Get(Str::UpdateTitle), MB_ICONERROR | MB_OK);
+    std::wstring command = L"\"" + updater + L"\"";
+    if (arguments && *arguments) {
+        command += L" ";
+        command += arguments;
     }
+
+    STARTUPINFOW startup{ sizeof(startup) };
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(updater.c_str(), command.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup,
+                        &process)) {
+        if (reportMissing) {
+            MessageBoxW(hwnd, L10n::Get(Str::UpdateNoUpdater),
+                        L10n::Get(Str::UpdateTitle), MB_ICONERROR | MB_OK);
+        }
+        return;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
 }
 
 void WidgetWindow::SignalUserExit() noexcept {

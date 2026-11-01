@@ -6,7 +6,7 @@
 // Пункт собственного меню. Оформление и поведение — в духе Windows 11:
 // скруглённая панель, тень, подсветка под курсором, «выскакивание» при открытии.
 struct ContextMenuItem {
-    enum class Kind { Title, Info, Action };
+    enum class Kind { Title, Info, Action, Footer };
     Kind kind = Kind::Action;
     std::wstring text;
     UINT id = 0;
@@ -14,6 +14,12 @@ struct ContextMenuItem {
     bool enabled = true;
     // Непустой список превращает пункт в раскрывающееся подменю (стрелка справа).
     std::vector<ContextMenuItem> submenu;
+
+    // Футер: «Версия: …» и две маленькие кнопки справа — проверить и обновить.
+    UINT checkId = 0;
+    UINT installId = 0;
+    bool updateAvailable = false;  // синяя точка на кнопке обновления
+    bool updateChecking = false;   // проверка уже идёт
 };
 
 // Показывает меню, растущее от прямоугольника виджета (anchorRect в экранных координатах).
