@@ -435,8 +435,15 @@ bool BekenStatusProvider::MatchDevice(HANDLE, const HIDP_CAPS& caps) noexcept {
     // Коллекция, куда вендорское ПО и открытые драйверы слушают interrupt-IN.
     // Мышиная коллекция 0x0001:0x0002 сюда не попадает: её отчёты — движение,
     // а не заряд.
-    return caps.UsagePage == 0x000A && caps.Usage == 0x0000 &&
-           caps.InputReportByteLength >= 5 && caps.InputReportByteLength <= 64;
+    if (caps.UsagePage == 0x000A && caps.Usage == 0x0000 &&
+        caps.InputReportByteLength >= 5 && caps.InputReportByteLength <= 64) {
+        return true;
+    }
+    // В кабельном режиме (FA61) статусной коллекции 0x000A нет, но остаётся
+    // вендорский 262-байтовый feature-интерфейс. Он нужен только как признак
+    // «мышь на проводе»: уровень берём из последнего беспроводного кадра.
+    return caps.UsagePage == 0x000B && caps.Usage == 0x0000 &&
+           caps.FeatureReportByteLength >= 8;
 }
 
 bool BekenStatusProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) {
@@ -445,6 +452,25 @@ bool BekenStatusProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTeleme
     if (!HidD_GetAttributes(hDev, &attr) || !Match(attr.VendorID, attr.ProductID)) return false;
 
     const uint16_t pid = attr.ProductID;
+
+    // Кабельный режим: своего уровня заряда Windows здесь не отдаёт (нет
+    // коллекции 0x000A), но сам факт FA61 означает «на проводе/зарядке».
+    // Показываем последний известный беспроводной уровень и флаг зарядки —
+    // так же, как официальная программа помечает проводной режим.
+    if (caps.UsagePage == 0x000B) {
+        constexpr ULONGLONG kCachedLevelTtlMs = 24ull * 60 * 60 * 1000;
+        if (pid != 0xFA61 || m_cache.level < 0) return false;
+        // Кэш должен быть от X6, а не от другого устройства семейства.
+        if (m_cache.pid != 0xFA60 && m_cache.pid != 0xFA61) return false;
+        if (GetTickCount64() - m_cache.tick > kCachedLevelTtlMs) return false;
+        outData.batteryLevel = m_cache.level;
+        outData.isCharging = true;
+        outData.voltageMv = -1;
+        outData.hasData = true;
+        outData.deviceName = L"Attack Shark X6";
+        return true;
+    }
+
     const auto modelName = [](uint16_t productId, uint8_t model) -> const wchar_t* {
         if (productId == 0xFA65) return L"Inphic In9 Pro";
         switch (model) {
