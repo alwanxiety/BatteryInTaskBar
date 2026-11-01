@@ -143,6 +143,21 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
         needEnumerate = (now - m_lastEnumerationTick) >= kEnumerationTtlMs;
     }
     if (needEnumerate) EnumerateCandidates();
+    // Устройство могли заменить: если прошлый удачный интерфейс исчез из
+    // перечисления, сбрасываем «залипшее» предпочтение.
+    if (m_lastGoodProvider != static_cast<std::size_t>(-1)) {
+        bool stillPresent = false;
+        for (const Candidate& candidate : m_candidates) {
+            if (candidate.path == m_lastGoodPath && candidate.priority == m_lastGoodProvider) {
+                stillPresent = true;
+                break;
+            }
+        }
+        if (!stillPresent) {
+            m_lastGoodPath.clear();
+            m_lastGoodProvider = static_cast<std::size_t>(-1);
+        }
+    }
     m_lastTrace.attempts.reserve(m_candidates.size() + 1);
 
     auto tryCandidate = [&](const Candidate& candidate) -> bool {
@@ -187,7 +202,19 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
 
     // Интерфейс и провайдер, ответившие в прошлый раз, опрашиваем первыми:
     // «молчащие» интерфейсы ресивера иначе тратят таймауты на каждом цикле.
-    const bool haveLastGood = !m_lastGoodPath.empty() && m_lastGoodProvider != static_cast<std::size_t>(-1);
+    // Но на одном интерфейсе может подойти несколько провайдеров: менее точный
+    // (Compx с эвристикой по байтам) не должен забирать приоритет у более
+    // точного (RedSquare) только потому, что он ответил в прошлый раз.
+    bool preferLastGood = !m_lastGoodPath.empty() &&
+                          m_lastGoodProvider != static_cast<std::size_t>(-1);
+    if (preferLastGood) {
+        for (const Candidate& candidate : m_candidates) {
+            if (candidate.path == m_lastGoodPath && candidate.priority < m_lastGoodProvider) {
+                preferLastGood = false;
+                break;
+            }
+        }
+    }
     const auto syncAbort = [&abortRequested] {
         const bool aborted = abortRequested();
         PollAbort::Set(aborted);
@@ -195,13 +222,13 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
     };
     const auto stop = [this] { m_lastTrace.aborted = true; PollAbort::Set(false); return false; };
     if (syncAbort()) return stop();
-    if (haveLastGood) {
+    if (preferLastGood) {
         for (const Candidate& candidate : m_candidates) {
             if (candidate.path == m_lastGoodPath && candidate.priority == m_lastGoodProvider && tryCandidate(candidate)) return true;
         }
     }
     for (const Candidate& candidate : m_candidates) {
-        if (haveLastGood && candidate.path == m_lastGoodPath && candidate.priority == m_lastGoodProvider) continue;
+        if (preferLastGood && candidate.path == m_lastGoodPath && candidate.priority == m_lastGoodProvider) continue;
         // Полноэкранная игра могла начаться прямо сейчас — не тратим ещё ~1 с на
         // следующий молчащий интерфейс.
         if (syncAbort()) return stop();
@@ -209,6 +236,11 @@ bool DeviceManager::Poll(DeviceTelemetry& outTelemetry, bool forceRescan,
     }
 
     if (syncAbort()) return stop();
+    // PnP-запас нужен устройствам без вендорского протокола. Если HID-провайдер
+    // уже отвечал за это устройство, его молчание означает сон, а не «нет
+    // данных»: не подменяем показания кэшем Windows, иначе плитка прыгает на
+    // 100 % и залипает, пока не перезапустишь виджет.
+    if (m_lastGoodProvider != static_cast<std::size_t>(-1)) return false;
     m_lastTrace.bluetoothTried = true;
     DeviceTelemetry bluetoothTelemetry;
     if (QueryBluetooth(bluetoothTelemetry)) {

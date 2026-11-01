@@ -430,20 +430,37 @@ bool CompxNordicProvider::MatchDevice(HANDLE, const HIDP_CAPS& caps) noexcept {
 }
 bool CompxNordicProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) {
     if (caps.UsagePage != 0xFFA0 && caps.UsagePage != 0xFF00 && caps.UsagePage != 0x0001) return false;
-    std::array<uint8_t, 64> buf{ 0x08 };
-    if (HidD_GetFeature(hDev, buf.data(), 64) || HidD_GetInputReport(hDev, buf.data(), 64)) {
-        // i + 1 читается как признак зарядки, поэтому i ограничен 6 (а не 7).
-        for (size_t i = 1; i + 1 < 8; ++i) {
-            if (buf[i] > 0 && buf[i] <= 100) {
-                outData.batteryLevel = buf[i];
-                outData.isCharging = (buf[i + 1] == 1 || buf[i + 1] == 2);
-                return true;
+
+    // Разбор здесь эвристический (первое правдоподобное число в отчёте), поэтому
+    // читаем дважды: одинаковый результат — это заряд, случайный отчёт движения
+    // дважды одно и то же число не даст.
+    auto readOnce = [&](DeviceTelemetry& out) -> bool {
+        std::array<uint8_t, 64> buf{ 0x08 };
+        if (HidD_GetFeature(hDev, buf.data(), 64) || HidD_GetInputReport(hDev, buf.data(), 64)) {
+            // i + 1 читается как признак зарядки, поэтому i ограничен 6 (а не 7).
+            for (size_t i = 1; i + 1 < 8; ++i) {
+                if (buf[i] > 0 && buf[i] <= 100) {
+                    out.batteryLevel = buf[i];
+                    out.isCharging = (buf[i + 1] == 1 || buf[i + 1] == 2);
+                    return true;
+                }
             }
         }
-    }
-    buf.fill(0); buf[0] = 0x04;
-    if (HidD_GetFeature(hDev, buf.data(), 16) && buf[1] > 0 && buf[1] <= 100) { outData.batteryLevel = buf[1]; outData.isCharging = (buf[2] == 0x01); return true; }
-    return false;
+        buf.fill(0); buf[0] = 0x04;
+        if (HidD_GetFeature(hDev, buf.data(), 16) && buf[1] > 0 && buf[1] <= 100) {
+            out.batteryLevel = buf[1];
+            out.isCharging = (buf[2] == 0x01);
+            return true;
+        }
+        return false;
+    };
+
+    DeviceTelemetry first;
+    if (!readOnce(first)) return false;
+    DeviceTelemetry second;
+    if (!readOnce(second) || second.batteryLevel != first.batteryLevel) return false;
+    outData = std::move(first);
+    return true;
 }
 
 // --- RedSquareProvider (VXE / Red Square, ATK, VGN) ---
@@ -477,6 +494,28 @@ const wchar_t* RedSquareProvider::ModelName(uint16_t vid, uint16_t pid) noexcept
 }
 
 bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) {
+    HIDD_ATTRIBUTES attr{ sizeof(HIDD_ATTRIBUTES) };
+    const bool haveAttributes = HidD_GetAttributes(hDev, &attr) != FALSE;
+    if (haveAttributes && attr.ProductID != m_devicePid) {
+        // Другое устройство — протокол может отличаться.
+        m_devicePid = attr.ProductID;
+        m_command = BatteryCommand::Unknown;
+    }
+
+    // Отчёт движения мыши тоже начинается с 0x08, а байт 1 может совпасть с
+    // командой (например, 0x04 — средняя кнопка). Одиночное совпадение ничего
+    // не доказывает: настоящий ответ стабилен, поэтому читаем дважды и требуем
+    // одинаковый заряд. Иначе плитка могла «поймать» 100 % из отчёта движения
+    // и залипнуть на нём до перезапуска.
+    auto readConfirmed = [&](uint8_t command, DeviceTelemetry& out) -> bool {
+        std::array<uint8_t, 17> first{};
+        if (!Exchange17(hDev, command, first) || !ParseBattery17(command, first, out)) return false;
+        std::array<uint8_t, 17> second{};
+        DeviceTelemetry confirm;
+        if (!Exchange17(hDev, command, second) || !ParseBattery17(command, second, confirm)) return false;
+        return confirm.batteryLevel == out.batteryLevel && confirm.isCharging == out.isCharging;
+    };
+
     // Vendor-коллекция ATK/VXE: 17 байт в обе стороны. Страницы 0xFF02 и 0xFF00
     // встречаются в разных ревизиях ресиверов; остальное отсекаем по геометрии отчёта.
     if ((caps.UsagePage == 0xFF02 || caps.UsagePage == 0xFF00) &&
@@ -488,14 +527,16 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
         const uint8_t first = legacyFirst ? 0x17 : 0x04;
         const uint8_t second = legacyFirst ? 0x04 : 0x17;
 
-        std::array<uint8_t, 17> response{};
-        bool ok = Exchange17(hDev, first, response) && ParseBattery17(first, response, outData);
-        if (!ok) {
-            response.fill(0);
-            ok = Exchange17(hDev, second, response) && ParseBattery17(second, response, outData);
-            if (ok) m_command = (second == 0x04) ? BatteryCommand::Full : BatteryCommand::Legacy;
-        } else {
+        DeviceTelemetry fallback;
+        bool ok = readConfirmed(first, outData);
+        if (ok) {
             m_command = (first == 0x04) ? BatteryCommand::Full : BatteryCommand::Legacy;
+        } else {
+            ok = readConfirmed(second, fallback);
+            if (ok) {
+                outData = std::move(fallback);
+                m_command = (second == 0x04) ? BatteryCommand::Full : BatteryCommand::Legacy;
+            }
         }
         if (!ok) return false;
     } else if (caps.UsagePage == 0xFF04 && caps.FeatureReportByteLength >= 8) {
@@ -506,8 +547,7 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
         return false;
     }
 
-    HIDD_ATTRIBUTES attr{ sizeof(HIDD_ATTRIBUTES) };
-    if (HidD_GetAttributes(hDev, &attr)) {
+    if (haveAttributes) {
         const wchar_t* name = ModelName(attr.VendorID, attr.ProductID);
         if (name && *name) outData.deviceName = name;
     }
@@ -571,8 +611,10 @@ bool RedSquareProvider::ParseBattery17(uint8_t command, const std::array<uint8_t
     if (command == 0x04) {
         const int level = response[6];
         if (level > 100) return false;
+        // Байт 7 — 0/1 (питание/кабель). Любое другое значение — это не ответ
+        // о заряде, а случайный отчёт (например, движение мыши).
+        if (response[7] > 1) return false;
         outData.batteryLevel = level;
-        // Байт 7: 0 — питание от батареи, 1 — кабель/зарядка.
         outData.isCharging = response[7] != 0;
         const int millivolts = (static_cast<int>(response[8]) << 8) | response[9];
         if (millivolts >= 2500 && millivolts <= 5000) outData.voltageMv = millivolts;

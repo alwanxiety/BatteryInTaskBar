@@ -99,6 +99,9 @@ private:
     static bool QueryFeatureBattery(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) noexcept;
     static const wchar_t* ModelName(uint16_t vid, uint16_t pid) noexcept;
     BatteryCommand m_command = BatteryCommand::Unknown;
+    // Кэш команды привязан к конкретному устройству: у разных ресиверов/мышей
+    // протокол может отличаться.
+    uint16_t m_devicePid = 0;
 };
 
 class BluetoothProvider {
