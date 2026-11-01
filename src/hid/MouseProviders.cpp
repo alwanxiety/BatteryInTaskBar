@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cwctype>
 #include <string>
@@ -20,6 +21,12 @@
 
 namespace {
 std::atomic<bool> g_pollAbort{ false };
+
+std::uint64_t NowUnixMs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+}
 
 std::wstring ToLowerCopy(std::wstring text) {
     if (!text.empty()) CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
@@ -459,11 +466,30 @@ bool BekenStatusProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTeleme
     // так же, как официальная программа помечает проводной режим.
     if (caps.UsagePage == 0x000B) {
         constexpr ULONGLONG kCachedLevelTtlMs = 24ull * 60 * 60 * 1000;
-        if (pid != 0xFA61 || m_cache.level < 0) return false;
-        // Кэш должен быть от X6, а не от другого устройства семейства.
-        if (m_cache.pid != 0xFA60 && m_cache.pid != 0xFA61) return false;
-        if (GetTickCount64() - m_cache.tick > kCachedLevelTtlMs) return false;
-        outData.batteryLevel = m_cache.level;
+        if (pid != 0xFA61) return false;
+
+        int level = -1;
+        if (m_cache.level >= 0 &&
+            (m_cache.pid == 0xFA60 || m_cache.pid == 0xFA61) &&
+            GetTickCount64() - m_cache.tick <= kCachedLevelTtlMs) {
+            level = m_cache.level;
+        } else {
+            // Виджет могли запустить уже с подключённым кабелем: в FA61
+            // уровня нет, поэтому берём последний уровень X6 из постоянного
+            // кэша телеметрии (он переживает перезапуск Explorer).
+            const DeviceTelemetry cached = AppState::Instance().GetTelemetry();
+            const std::uint64_t lastSuccess = AppState::Instance().LastSuccessUnixMs();
+            const std::uint64_t now = NowUnixMs();
+            if (cached.hasData && cached.batteryLevel >= 0 &&
+                cached.deviceName.find(L"X6") != std::wstring::npos &&
+                lastSuccess != 0 && now >= lastSuccess &&
+                now - lastSuccess <= kCachedLevelTtlMs) {
+                level = cached.batteryLevel;
+            }
+        }
+        if (level < 0) return false;
+
+        outData.batteryLevel = level;
         outData.isCharging = true;
         outData.voltageMv = -1;
         outData.hasData = true;
