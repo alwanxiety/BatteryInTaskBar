@@ -1102,7 +1102,8 @@ bool ApplyUpdate(const std::wstring& installDir, const ReleaseInfo& release,
             StartInjector(installDir, error);
             return false;
         }
-        WaitForWidgetStart(kWatcherStartTimeoutMs);
+        const bool started = WaitForWidgetStart(kWatcherStartTimeoutMs);
+        LogLine(L"widget started after update: %ls", started ? L"yes" : L"no");
     }
 
     LogLine(L"update installed: %ls", release.version.c_str());
