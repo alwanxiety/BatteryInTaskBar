@@ -1,6 +1,7 @@
 param(
     [string]$Dll = "",
     [string]$Exe = "",
+    [string]$Updater = "",
     [string]$Thumbprint = "",
     [switch]$CreateSelfSigned,
     [string]$TimestampUrl = "http://timestamp.digicert.com"
@@ -10,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Dll)) { $Dll = Join-Path $root "cmake-build-release\taskbar_mod.dll" }
 if ([string]::IsNullOrWhiteSpace($Exe)) { $Exe = Join-Path $root "cmake-build-release\injector.exe" }
+if ([string]::IsNullOrWhiteSpace($Updater)) { $Updater = Join-Path $root "cmake-build-release\updater.exe" }
 
 $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
@@ -46,7 +48,7 @@ if ($cert) {
     Write-Output ("Valid until: {0:yyyy-MM-dd}" -f $cert.NotAfter)
 }
 
-$files = @($Dll, $Exe) | Where-Object { Test-Path $_ }
+$files = @($Dll, $Exe, $Updater) | Where-Object { Test-Path $_ }
 if ($files.Count -eq 0) { throw "Nothing to sign: files not found." }
 
 foreach ($file in $files) {

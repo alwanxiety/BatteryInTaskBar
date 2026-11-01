@@ -71,6 +71,24 @@ target_link_libraries(injector PRIVATE
         hid
 )
 
+add_executable(updater WIN32
+        updater.cpp
+        src/core/AppPaths.cpp
+        src/core/Localization.cpp
+        res/version_updater.rc
+)
+target_include_directories(updater PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(updater PRIVATE UNICODE _UNICODE)
+target_link_libraries(updater PRIVATE
+        user32
+        gdi32
+        advapi32
+        shell32
+        comctl32
+        bcrypt
+        winhttp
+)
+
 # Sign built binaries manually: cmake --build ... --target sign
 # (close the widget first: Explorer keeps the DLL loaded).
 add_custom_target(sign
@@ -78,9 +96,10 @@ add_custom_target(sign
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/sign.ps1"
                 -Dll "$<TARGET_FILE:taskbar_mod>"
                 -Exe "$<TARGET_FILE:injector>"
+                -Updater "$<TARGET_FILE:updater>"
                 -CreateSelfSigned
-        DEPENDS taskbar_mod injector
-        COMMENT "Sign taskbar_mod.dll and injector.exe"
+        DEPENDS taskbar_mod injector updater
+        COMMENT "Sign taskbar_mod.dll, injector.exe and updater.exe"
         VERBATIM)
 
 # Протокольные тесты без реального устройства: синтетические отчёты ATK/VXE

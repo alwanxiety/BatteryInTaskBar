@@ -51,6 +51,29 @@ enum class Str {
     InjectFailedTitle,  // заголовок ошибки запуска
     InjectFailedText,   // «Не удалось внедрить виджет в Explorer…»
     LevelUnchangedHint, // «Заряд не менялся больше суток» (залипший индикатор)
+    CheckUpdates,       // «Проверить обновления» в меню
+    UpdateTitle,        // заголовок окна обновления
+    UpdateChecking,     // «Проверка обновлений…»
+    UpdateUpToDate,     // «У вас последняя версия %ls.»
+    UpdateAvailable,    // «Доступна версия %ls (у вас %ls).»
+    UpdateDownloading,  // «Скачивание %ls…»
+    UpdateVerifying,    // «Проверка контрольных сумм…»
+    UpdateInstalling,   // «Установка обновления…»
+    UpdateRestarting,   // «Перезапуск виджета…»
+    UpdateDone,         // «Обновление установлено. Виджет перезапущен.»
+    UpdateFailed,       // «Не удалось обновить: %ls»
+    UpdateNetworkError, // «Не удалось проверить обновления…»
+    UpdateNoAssets,     // «В релизе нет нужных файлов.»
+    UpdateChecksumMismatch, // «Контрольная сумма не совпала: %ls»
+    UpdateFileBusy,     // «Не удалось заменить %ls: файл занят.»
+    UpdateWidgetLoaded, // «Виджет всё ещё загружен в Explorer…»
+    UpdateNoUpdater,    // «updater.exe не найден рядом с виджетом…»
+    UpdateAlreadyRunning, // «Обновление уже запущено.»
+    UpdateNoWriteAccess,  // «Нет прав на запись в папку программы.»
+    UpdateButton,       // «Обновить»
+    UpdateLater,        // «Позже»
+    UpdateClose,        // «Закрыть»
+    UpdateOpenRelease,  // «Открыть страницу релиза»
 };
 
 namespace L10n {

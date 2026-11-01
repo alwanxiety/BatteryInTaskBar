@@ -57,4 +57,5 @@ jobs:
           path: |
             build/Release/taskbar_mod.dll
             build/Release/injector.exe
+            build/Release/updater.exe
 

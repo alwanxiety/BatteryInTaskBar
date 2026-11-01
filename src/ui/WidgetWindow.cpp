@@ -403,6 +403,18 @@ std::uint64_t NowUnixMs() {
             std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+std::wstring WidgetModuleDirectory(HMODULE hInst) {
+    std::array<WCHAR, MAX_PATH> path{};
+    const DWORD length =
+        GetModuleFileNameW(hInst, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return {};
+    std::wstring full(path.data(), length);
+    const auto slash = full.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return {};
+    full.resize(slash + 1);
+    return full;
+}
+
 /// Процесс оболочки Windows: Explorer и её отдельные хосты (меню «Пуск»,
 /// поиск, быстрые настройки). Их всплывающие окна бывают размером на весь
 /// монитор, но полноэкранным приложением они не являются.
@@ -1197,6 +1209,7 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case IDM_THEME_DARK: ApplyTheme(WidgetTheme::Dark, true); break;
         case IDM_THEME_LIGHT: ApplyTheme(WidgetTheme::Light, true); break;
         case IDM_REPORT: ShowDiagnosticsReport(hwnd); break;
+        case IDM_UPDATE: LaunchUpdater(hwnd, m_hInst); break;
         case IDM_EXIT:
             SignalUserExit();
             PostQuitMessage(0);
@@ -1334,6 +1347,11 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
     autoRun.id = IDM_AUTORUN;
     autoRun.checked = IsAutoRunEnabled();
     items.push_back(std::move(autoRun));
+
+    ContextMenuItem update;
+    update.text = L10n::Get(Str::CheckUpdates);
+    update.id = IDM_UPDATE;
+    items.push_back(std::move(update));
 
     ContextMenuItem exitItem;
     exitItem.text = L10n::Get(Str::CloseWidget);
@@ -1616,6 +1634,26 @@ void WidgetWindow::SyncAutoRunCommand(HMODULE hInst) {
                        static_cast<DWORD>((expected.size() + 1) * sizeof(WCHAR)));
     }
     RegCloseKey(hKey);
+}
+
+void WidgetWindow::LaunchUpdater(HWND hwnd, HMODULE hInst) {
+    const std::wstring directory = WidgetModuleDirectory(hInst);
+    const std::wstring updater =
+        directory.empty() ? std::wstring{} : directory + L"updater.exe";
+    if (updater.empty() ||
+        GetFileAttributesW(updater.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxW(hwnd, L10n::Get(Str::UpdateNoUpdater),
+                    L10n::Get(Str::UpdateTitle), MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+
+    const HINSTANCE result = ShellExecuteW(
+        hwnd, L"open", updater.c_str(), nullptr,
+        directory.empty() ? nullptr : directory.c_str(), SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        MessageBoxW(hwnd, L10n::Get(Str::UpdateNoUpdater),
+                    L10n::Get(Str::UpdateTitle), MB_ICONERROR | MB_OK);
+    }
 }
 
 void WidgetWindow::SignalUserExit() noexcept {
