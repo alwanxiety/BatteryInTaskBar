@@ -1,4 +1,5 @@
 #include "hid/MouseProviders.h"
+#include "hid/RedSquareProtocol.h"
 #include <windows.h>
 #include <hidsdi.h>
 #include <hidpi.h>
@@ -509,11 +510,21 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
     // и залипнуть на нём до перезапуска.
     auto readConfirmed = [&](uint8_t command, DeviceTelemetry& out) -> bool {
         std::array<uint8_t, 17> first{};
-        if (!Exchange17(hDev, command, first) || !ParseBattery17(command, first, out)) return false;
+        RedSquareProtocol::Reading a;
+        if (!Exchange17(hDev, command, first) || !RedSquareProtocol::Parse(command, first, a)) {
+            return false;
+        }
         std::array<uint8_t, 17> second{};
-        DeviceTelemetry confirm;
-        if (!Exchange17(hDev, command, second) || !ParseBattery17(command, second, confirm)) return false;
-        return confirm.batteryLevel == out.batteryLevel && confirm.isCharging == out.isCharging;
+        RedSquareProtocol::Reading b;
+        if (!Exchange17(hDev, command, second) || !RedSquareProtocol::Parse(command, second, b)) {
+            return false;
+        }
+        if (a.level != b.level || a.charging != b.charging) return false;
+
+        out.batteryLevel = a.level;
+        out.isCharging = a.charging;
+        out.voltageMv = a.voltageMv;
+        return true;
     };
 
     // Vendor-коллекция ATK/VXE: 17 байт в обе стороны. Страницы 0xFF02 и 0xFF00
@@ -603,34 +614,6 @@ bool RedSquareProvider::Exchange17(HANDLE hDev, uint8_t command, std::array<uint
 
     response = report;
     return true;
-}
-
-bool RedSquareProvider::ParseBattery17(uint8_t command, const std::array<uint8_t, 17>& response, DeviceTelemetry& outData) noexcept {
-    if (response[0] != 0x08 || response[1] != command) return false;
-
-    if (command == 0x04) {
-        const int level = response[6];
-        if (level > 100) return false;
-        // Байт 7 — 0/1 (питание/кабель). Любое другое значение — это не ответ
-        // о заряде, а случайный отчёт (например, движение мыши).
-        if (response[7] > 1) return false;
-        outData.batteryLevel = level;
-        outData.isCharging = response[7] != 0;
-        const int millivolts = (static_cast<int>(response[8]) << 8) | response[9];
-        if (millivolts >= 2500 && millivolts <= 5000) outData.voltageMv = millivolts;
-        return true;
-    }
-
-    if (command == 0x17) {
-        // Старый вариант: заряд отдаётся половинными шагами, отсюда умножение на 2.
-        const int level = response[5] * 2;
-        if (level <= 0 || level > 100) return false;
-        outData.batteryLevel = level;
-        outData.isCharging = false;
-        return true;
-    }
-
-    return false;
 }
 
 bool RedSquareProvider::QueryFeatureBattery(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) noexcept {

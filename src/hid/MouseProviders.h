@@ -95,7 +95,6 @@ public:
 private:
     enum class BatteryCommand : uint8_t { Unknown, Full, Legacy };
     static bool Exchange17(HANDLE hDev, uint8_t command, std::array<uint8_t, 17>& response) noexcept;
-    static bool ParseBattery17(uint8_t command, const std::array<uint8_t, 17>& response, DeviceTelemetry& outData) noexcept;
     static bool QueryFeatureBattery(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) noexcept;
     static const wchar_t* ModelName(uint16_t vid, uint16_t pid) noexcept;
     BatteryCommand m_command = BatteryCommand::Unknown;
