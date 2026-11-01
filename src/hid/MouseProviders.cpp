@@ -444,6 +444,18 @@ bool BekenStatusProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTeleme
     if (!HidD_GetAttributes(hDev, &attr) || !Match(attr.VendorID, attr.ProductID)) return false;
 
     const uint16_t pid = attr.ProductID;
+    const auto modelName = [](uint16_t productId, uint8_t model) -> const wchar_t* {
+        if (productId == 0xFA65) return L"Inphic In9 Pro";
+        switch (model) {
+            case 0x10:
+            case 0x85: return L"Attack Shark X6";
+            case 0x4D: return L"Attack Shark X3";
+            case 0x4E: return L"Attack Shark X3 Max";
+            case 0xBC: return L"Attack Shark M3";
+            case 0x55: return L"Attack Shark X11";
+            default: return L"Attack Shark";
+        }
+    };
     auto accept = [&](const BekenStatusProtocol::Reading& reading, uint8_t model) -> bool {
         if (m_cache.pid != pid) m_cache = Cache{ pid };
         if (reading.level >= 0) {
@@ -463,11 +475,7 @@ bool BekenStatusProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTeleme
         outData.isCharging = m_cache.charging;
         outData.voltageMv = -1;
         outData.hasData = true;
-        if (pid == 0xFA60) {
-            outData.deviceName = (model == 0x10) ? L"Attack Shark X6" : L"Attack Shark X11";
-        } else {
-            outData.deviceName = L"Inphic In9 Pro";
-        }
+        outData.deviceName = modelName(pid, model);
         return true;
     };
 
@@ -492,12 +500,7 @@ bool BekenStatusProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTeleme
         outData.isCharging = m_cache.charging;
         outData.voltageMv = -1;
         outData.hasData = true;
-        if (pid == 0xFA60) {
-            outData.deviceName = (m_cache.model == 0x10) ? L"Attack Shark X6"
-                                                         : L"Attack Shark X11";
-        } else {
-            outData.deviceName = L"Inphic In9 Pro";
-        }
+        outData.deviceName = modelName(pid, m_cache.model);
         return true;
     }
     return false;
