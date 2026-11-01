@@ -1120,14 +1120,9 @@ bool ApplyUpdate(const std::wstring& installDir, const ReleaseInfo& release,
 // --- Тихие режимы (виджет не показывает интерфейс обновлятора) -------------
 
 int RunSilentCheck() {
-    HANDLE checkMutex =
-        CreateMutexW(nullptr, FALSE, L"Local\\BatteryInTaskBar.UpdateCheck");
-    if (!checkMutex) return 2;
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(checkMutex);
-        return 0;
-    }
-
+    // Отдельный процесс: сеть не занимает поток интерфейса виджета. Не
+    // блокируем повторные проверки мьютексом — ручная кнопка должна всегда
+    // получить свежий CheckedAt, даже если фоновая проверка ещё идёт.
     ReleaseInfo release;
     std::wstring error;
     const CheckResult result = CheckLatestRelease(release, error);
@@ -1147,7 +1142,6 @@ int RunSilentCheck() {
     }
     UpdateState::Write(state);
 
-    CloseHandle(checkMutex);
     return result == CheckResult::Available ? 1
          : (result == CheckResult::Error ? 2 : 0);
 }

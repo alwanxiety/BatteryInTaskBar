@@ -94,9 +94,13 @@ constexpr Entry kStrings[] = {
     /* UpdateClose      */ { L"Закрыть", L"Close" },
     /* UpdateOpenRelease*/ { L"Открыть страницу релиза", L"Open the release page" },
     /* VersionPrefix    */ { L"Версия: ", L"Version: " },
+    /* UpdateCheckingShort */ { L"Проверка…", L"Checking…" },
+    /* UpdateNoticeAvailable */ { L"Обновление %ls", L"Update %ls" },
+    /* UpdateNoticeCurrent */ { L"Обновлений нет", L"No updates" },
+    /* UpdateNoticeError */ { L"Ошибка проверки", L"Check failed" },
 };
 
-static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::VersionPrefix) + 1,
+static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::UpdateNoticeError) + 1,
               "таблица строк разошлась с enum Str");
 
 Lang g_lang = Lang::En;

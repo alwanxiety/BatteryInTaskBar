@@ -162,6 +162,9 @@ private:
     ULONGLONG m_checkStarted{ 0 };
     ULONGLONG m_checkLastPoll{ 0 };
     std::uint64_t m_checkLastSeen{ 0 };
+    std::wstring m_footerNotice;
+    ULONGLONG m_noticeUntil{ 0 };
+    int m_noticeKind{ 0 };  // 1 — есть обновление, 2 — нет, 3 — ошибка
     bool m_hoverFromMouse{ false };
     bool m_escapeDown{ false };
     // Защита от повторного раскрытия подменю, закрытого клавишей: курсор остаётся
@@ -536,6 +539,11 @@ UINT Win11Menu::Run() {
     auto needsFrames = [this]() -> bool {
         if (!m_showDone || m_closing || m_submenu) return true;
         if (m_hoverFromMouse && HasSubmenu(m_hover)) return true;  // задержка подменю
+        // Пока идёт проверка или показывается её результат, кадры нужны:
+        // иначе «застывшее» меню перестанет опрашивать UpdateState.
+        const int footer = FooterIndex();
+        if (footer >= 0 && m_items[footer].updateChecking) return true;
+        if (m_noticeUntil != 0 && GetTickCount64() < m_noticeUntil) return true;
         for (std::size_t i = 0; i < m_hoverProgress.size(); ++i) {
             const float target = (static_cast<int>(i) == m_hover) ? 1.0f : 0.0f;
             if (m_hoverProgress[i] != target) return true;
@@ -657,6 +665,13 @@ void Win11Menu::Tick() {
 
     bool needsPaint = false;
 
+    if (m_noticeUntil != 0 && now >= m_noticeUntil) {
+        m_noticeUntil = 0;
+        m_footerNotice.clear();
+        m_noticeKind = 0;
+        needsPaint = true;
+    }
+
     if (!m_showDone) {
         const float t = Clamp01(static_cast<float>(now - m_showStart) / (kShowSeconds * 1000.0f));
         m_show = t;
@@ -695,9 +710,26 @@ void Win11Menu::Tick() {
                 state.checkedAtUnixMs != m_checkLastSeen) {
                 m_items[footer].updateChecking = false;
                 m_items[footer].updateAvailable = state.available;
+                m_noticeUntil = now + 6000;
+                if (state.available) {
+                    wchar_t notice[128]{};
+                    swprintf_s(notice, L10n::Get(Str::UpdateNoticeAvailable),
+                               state.latest.c_str());
+                    m_footerNotice = notice;
+                    m_noticeKind = 1;
+                } else if (!state.error.empty()) {
+                    m_footerNotice = L10n::Get(Str::UpdateNoticeError);
+                    m_noticeKind = 3;
+                } else {
+                    m_footerNotice = L10n::Get(Str::UpdateNoticeCurrent);
+                    m_noticeKind = 2;
+                }
                 needsPaint = true;
             } else if (m_checkStarted != 0 && now - m_checkStarted > 15000) {
                 m_items[footer].updateChecking = false;
+                m_footerNotice = L10n::Get(Str::UpdateNoticeError);
+                m_noticeKind = 3;
+                m_noticeUntil = now + 6000;
                 needsPaint = true;
             }
         }
@@ -1080,22 +1112,35 @@ void Win11Menu::DrawFooter(int index, float bodyLeft, float bodyTop,
     const D2D1_COLOR_F hoverColor = m_dark ? MakeColor(1.0f, 1.0f, 1.0f, 0.075f)
                                            : MakeColor(0.0f, 0.0f, 0.0f, 0.055f);
 
-    // Тонкий разделитель отделяет футер от пунктов меню.
-    m_brush->SetColor(m_dark ? MakeColor(1.0f, 1.0f, 1.0f, 0.07f)
-                             : MakeColor(0.0f, 0.0f, 0.0f, 0.08f));
-    m_renderTarget->DrawLine(D2D1::Point2F(bodyLeft + kBodyPadX, top),
-                             D2D1::Point2F(bodyRight - kBodyPadX, top),
-                             m_brush.Get(), 1.0f);
-
-    DrawItemText(index,
-                 D2D1::RectF(bodyLeft + kBodyPadX, top, bodyRight - kBodyPadX,
-                             top + height),
-                 secondary);
-
     const float updateLeft =
         bodyRight - kBodyPadX - kFooterRightPad - kFooterIconSize;
     const float checkLeft =
         updateLeft - kFooterIconGap - kFooterIconSize;
+
+    // Без разделителя: версия/уведомление и иконки — одна строка.
+    std::wstring text = item.text;
+    D2D1_COLOR_F textColor = secondary;
+    const ULONGLONG now = GetTickCount64();
+    if (!m_footerNotice.empty() && m_noticeUntil != 0 && now < m_noticeUntil) {
+        text = m_footerNotice;
+        if (m_noticeKind == 1) {
+            textColor = m_dark ? MakeColor(0.30f, 0.76f, 1.0f)
+                               : MakeColor(0.0f, 0.47f, 0.83f);
+        } else if (m_noticeKind == 3) {
+            textColor = m_dark ? MakeColor(1.0f, 0.45f, 0.48f)
+                               : MakeColor(0.82f, 0.20f, 0.22f);
+        }
+    } else if (item.updateChecking) {
+        text = L10n::Get(Str::UpdateCheckingShort);
+    }
+
+    m_brush->SetColor(textColor);
+    m_renderTarget->DrawText(
+        text.c_str(), static_cast<UINT32>(text.size()), m_formatInfo.Get(),
+        D2D1::RectF(bodyLeft + kBodyPadX, top, checkLeft - 6.0f,
+                    top + height),
+        m_brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        DWRITE_MEASURING_MODE_NATURAL);
 
     auto drawButton = [&](float left, int hoverButton, bool enabled,
                           const wchar_t* glyph) {
@@ -1232,6 +1277,9 @@ LRESULT Win11Menu::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 if (item.updateChecking) return 0;
                 if (item.onCheck) {
                     item.updateChecking = true;
+                    m_footerNotice.clear();
+                    m_noticeUntil = 0;
+                    m_noticeKind = 0;
                     m_checkStarted = GetTickCount64();
                     m_checkLastPoll = 0;
                     m_checkLastSeen = UpdateState::Read().checkedAtUnixMs;

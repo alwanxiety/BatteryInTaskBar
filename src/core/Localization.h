@@ -75,6 +75,10 @@ enum class Str {
     UpdateClose,        // «Закрыть»
     UpdateOpenRelease,  // «Открыть страницу релиза»
     VersionPrefix,      // «Версия: » в футере меню
+    UpdateCheckingShort,   // «Проверка…» в футере
+    UpdateNoticeAvailable, // «Обновление %ls» в футере
+    UpdateNoticeCurrent,   // «Обновлений нет» в футере
+    UpdateNoticeError,     // «Ошибка проверки» в футере
 };
 
 namespace L10n {
