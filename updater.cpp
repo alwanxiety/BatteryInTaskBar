@@ -1453,13 +1453,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     CloseHandle(instanceMutex);
 
-    // Проверочный поток мог остаться; даём ему завершиться, чтобы не
-    // освобождать общий лог во время записи.
+    // Проверочный поток мог остаться; даём ему короткое время завершиться.
+    // Критическую секцию не удаляем: процесс всё равно завершается, а гонка
+    // с потоком, который ещё пишет в лог, была бы хуже утечки при выходе.
     for (int i = 0; i < 40 && g_checkRunning.load(); ++i) Sleep(50);
-
-    if (g_logLockReady) {
-        g_logLockReady = false;
-        DeleteCriticalSection(&g_logLock);
-    }
     return 0;
 }
