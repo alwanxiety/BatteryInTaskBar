@@ -43,6 +43,8 @@ constexpr float kTitleHeight = 32.0f;
 constexpr float kInfoHeight = 22.0f;
 constexpr float kActionHeight = 30.0f;
 constexpr float kFooterHeight = 30.0f;
+// Запас справа под галочку/стрелку подменю: текст не должен прилипать к знаку.
+constexpr float kTrailingMarkReserve = 22.0f;
 constexpr float kFooterIconSize = 24.0f;
 constexpr float kFooterIconGap = 6.0f;
 constexpr float kFooterRightPad = 8.0f;
@@ -298,7 +300,7 @@ void Win11Menu::BuildLayout() {
         case ContextMenuItem::Kind::Action:
             height = kActionHeight;
             width = measureWidth(item.text, m_formatAction.Get()) + kBodyPadX * 2.0f +
-                    (NeedsTrailingMark(item) ? 16.0f : 0.0f);
+                    (NeedsTrailingMark(item) ? kTrailingMarkReserve : 0.0f);
             break;
         case ContextMenuItem::Kind::Footer:
             height = kFooterHeight;
@@ -330,7 +332,7 @@ void Win11Menu::BuildLayout() {
         if (item.kind == ContextMenuItem::Kind::Title) format = m_formatTitle.Get();
         else if (item.kind == ContextMenuItem::Kind::Action) format = m_formatAction.Get();
         float width = m_contentW - left - kBodyPadX -
-                      (NeedsTrailingMark(item) ? 16.0f : 0.0f);
+                      (NeedsTrailingMark(item) ? kTrailingMarkReserve : 0.0f);
         if (item.kind == ContextMenuItem::Kind::Footer) {
             width -= kFooterIconSize * 2.0f + kFooterIconGap + kFooterRightPad;
         }

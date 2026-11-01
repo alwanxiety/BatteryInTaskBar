@@ -28,7 +28,7 @@ constexpr Entry kStrings[] = {
     /* ThemeDark        */ { L"Тёмная", L"Dark" },
     /* ThemeLight       */ { L"Светлая", L"Light" },
     /* RefreshNow       */ { L"Обновить статус сейчас", L"Refresh status now" },
-    /* StartWithWindows */ { L"Запускать при старте системы", L"Start with Windows" },
+    /* StartWithWindows */ { L"Запускать при старте", L"Start with Windows" },
     /* CloseWidget      */ { L"Закрыть виджет", L"Close widget" },
     /* SubSearching     */ { L"Поиск устройства…", L"Searching for device…" },
     /* SubConnected     */ { L"Подключено", L"Connected" },
