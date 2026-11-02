@@ -5,6 +5,7 @@
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include <winhttp.h>
+#include <winver.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -198,6 +199,35 @@ std::wstring ModuleDirectory() {
     if (slash == std::wstring::npos) return {};
     path.resize(slash + 1);
     return path;
+}
+
+/// Версия установленного виджета, а не самого updater.exe. Иначе старый
+/// обновлятор после установки 1.0.8 продолжит видеть «доступно 1.0.8».
+std::wstring InstalledAppVersion() {
+    const std::wstring dll = ModuleDirectory() + kDllName;
+    DWORD ignored = 0;
+    const DWORD size = GetFileVersionInfoSizeW(dll.c_str(), &ignored);
+    if (size == 0) return APP_VERSION_WSTRING;
+
+    std::vector<BYTE> data(size);
+    if (!GetFileVersionInfoW(dll.c_str(), 0, size, data.data())) {
+        return APP_VERSION_WSTRING;
+    }
+
+    VS_FIXEDFILEINFO* version = nullptr;
+    UINT length = 0;
+    if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID*>(&version),
+                        &length) ||
+        !version) {
+        return APP_VERSION_WSTRING;
+    }
+
+    wchar_t text[32]{};
+    swprintf_s(text, L"%u.%u.%u",
+               HIWORD(version->dwFileVersionMS),
+               LOWORD(version->dwFileVersionMS),
+               HIWORD(version->dwFileVersionLS));
+    return text;
 }
 
 bool EnsureDirectory(const std::wstring& path) {
@@ -769,7 +799,7 @@ CheckResult CheckLatestRelease(ReleaseInfo& info, std::wstring& error) {
 
     if (!ParseRelease(json, info, error)) return CheckResult::Error;
 
-    if (CompareVersions(info.version, APP_VERSION_WSTRING) <= 0) {
+    if (CompareVersions(info.version, InstalledAppVersion()) <= 0) {
         return CheckResult::UpToDate;
     }
 
@@ -1134,8 +1164,8 @@ int RunSilentCheck() {
         state.latest = release.version;
         LogLine(L"silent check: update available %ls", release.version.c_str());
     } else if (result == CheckResult::UpToDate) {
-        state.latest = APP_VERSION_WSTRING;
-        LogLine(L"silent check: up to date %ls", APP_VERSION_WSTRING);
+        state.latest = InstalledAppVersion();
+        LogLine(L"silent check: up to date %ls", state.latest.c_str());
     } else {
         state.error = error;
         LogLine(L"silent check failed: %ls", error.c_str());
@@ -1161,7 +1191,7 @@ int RunSilentInstall() {
         UpdateState::Info state;
         state.checkedAtUnixMs = NowUnixMs();
         state.error = (result == CheckResult::Error) ? error : std::wstring{};
-        state.latest = (result == CheckResult::UpToDate) ? std::wstring(APP_VERSION_WSTRING)
+        state.latest = (result == CheckResult::UpToDate) ? InstalledAppVersion()
                                                          : std::wstring{};
         UpdateState::Write(state);
         LogLine(L"silent install skipped: %ls",
@@ -1238,7 +1268,7 @@ DWORD WINAPI CheckThreadProc(LPVOID) {
     std::wstring error;
     const CheckResult result = CheckLatestRelease(info, error);
     if (result == CheckResult::Available) {
-        LogLine(L"update available: %ls -> %ls", APP_VERSION_WSTRING,
+        LogLine(L"update available: %ls -> %ls", InstalledAppVersion().c_str(),
                 info.version.c_str());
         {
             std::lock_guard lock(g_releaseMutex);
@@ -1247,10 +1277,10 @@ DWORD WINAPI CheckThreadProc(LPVOID) {
         PostMessageW(g_window, WM_APP_CHECK_DONE, 1,
                      reinterpret_cast<LPARAM>(new std::wstring(info.version)));
     } else if (result == CheckResult::UpToDate) {
-        LogLine(L"already up to date: %ls", APP_VERSION_WSTRING);
+        LogLine(L"already up to date: %ls", InstalledAppVersion().c_str());
         PostMessageW(g_window, WM_APP_CHECK_DONE, 0,
                      reinterpret_cast<LPARAM>(
-                         new std::wstring(APP_VERSION_WSTRING)));
+                         new std::wstring(InstalledAppVersion())));
     } else {
         LogLine(L"check failed: %ls", error.c_str());
         PostMessageW(g_window, WM_APP_CHECK_DONE, 2,
@@ -1373,7 +1403,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam,
 
         if (wParam == 1) {
             SetStatus(FormatText(L10n::Get(Str::UpdateAvailable),
-                                 value.c_str(), APP_VERSION_WSTRING));
+                                 value.c_str(), InstalledAppVersion().c_str()));
             ShowButtons(true, true, false, false);
             if (g_auto) {
                 StartApply(hwnd);
@@ -1483,8 +1513,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         else if (_wcsicmp(arg.c_str(), L"--check-silent") == 0) silentCheck = true;
         else if (_wcsicmp(arg.c_str(), L"--install-silent") == 0) silentInstall = true;
     }
-    LogLine(L"updater start, version=%ls, install=%ls, test=%ls, auto=%d noStop=%d noStart=%d silentCheck=%d silentInstall=%d",
-            APP_VERSION_WSTRING, ModuleDirectory().c_str(),
+    LogLine(L"updater start, version=%ls, appVersion=%ls, install=%ls, test=%ls, auto=%d noStop=%d noStart=%d silentCheck=%d silentInstall=%d",
+            APP_VERSION_WSTRING, InstalledAppVersion().c_str(), ModuleDirectory().c_str(),
             TestReleaseDirectory().c_str(), g_auto ? 1 : 0, g_noStop ? 1 : 0,
             g_noStart ? 1 : 0, silentCheck ? 1 : 0, silentInstall ? 1 : 0);
 

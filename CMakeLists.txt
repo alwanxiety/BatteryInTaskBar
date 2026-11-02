@@ -89,6 +89,7 @@ target_link_libraries(updater PRIVATE
         comctl32
         bcrypt
         winhttp
+        version
 )
 
 # Sign built binaries manually: cmake --build ... --target sign
