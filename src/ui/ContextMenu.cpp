@@ -160,6 +160,7 @@ private:
 
     int m_hover{ -1 };
     int m_footerHoverButton{ 0 };  // 0 — нет, 1 — проверка, 2 — обновление
+    float m_footerHoverProgress[2]{ 0.0f, 0.0f };
     bool m_footerHoverDirty{ false };
     ULONGLONG m_checkStarted{ 0 };
     ULONGLONG m_checkLastPoll{ 0 };
@@ -546,6 +547,11 @@ UINT Win11Menu::Run() {
         const int footer = FooterIndex();
         if (footer >= 0 && m_items[footer].updateChecking) return true;
         if (m_noticeUntil != 0 && GetTickCount64() < m_noticeUntil) return true;
+        if (m_footerHoverDirty) return true;
+        for (int i = 0; i < 2; ++i) {
+            const float target = (m_footerHoverButton == i + 1) ? 1.0f : 0.0f;
+            if (m_footerHoverProgress[i] != target) return true;
+        }
         for (std::size_t i = 0; i < m_hoverProgress.size(); ++i) {
             const float target = (static_cast<int>(i) == m_hover) ? 1.0f : 0.0f;
             if (m_hoverProgress[i] != target) return true;
@@ -747,6 +753,20 @@ void Win11Menu::Tick() {
             needsPaint = true;
         } else {
             m_hoverProgress[i] = next;
+        }
+    }
+
+    // Футерные иконки анимируются так же, как обычные пункты меню.
+    for (int i = 0; i < 2; ++i) {
+        const float target = (m_footerHoverButton == i + 1) ? 1.0f : 0.0f;
+        float next = m_footerHoverProgress[i] +
+                     (target - m_footerHoverProgress[i]) * smoothing;
+        if (std::abs(next - target) < 0.004f) next = target;
+        if (std::abs(next - m_footerHoverProgress[i]) > 0.001f) {
+            m_footerHoverProgress[i] = next;
+            needsPaint = true;
+        } else {
+            m_footerHoverProgress[i] = next;
         }
     }
 
@@ -1146,8 +1166,12 @@ void Win11Menu::DrawFooter(int index, float bodyLeft, float bodyTop,
 
     auto drawButton = [&](float left, int hoverButton, bool enabled,
                           const wchar_t* glyph) {
-        if (m_footerHoverButton == hoverButton && enabled) {
-            m_brush->SetColor(hoverColor);
+        const float hover = enabled ? m_footerHoverProgress[hoverButton - 1]
+                                    : 0.0f;
+        if (hover > 0.001f) {
+            D2D1_COLOR_F color = hoverColor;
+            color.a *= hover;
+            m_brush->SetColor(color);
             m_renderTarget->FillRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(left, centerY - kFooterIconSize * 0.5f,
