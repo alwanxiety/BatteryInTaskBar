@@ -47,6 +47,7 @@ target_link_libraries(taskbar_mod PRIVATE
         advapi32
         dwmapi
         ole32
+        comctl32
         uiautomationcore
         windowsapp
 )

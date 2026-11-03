@@ -79,6 +79,8 @@ enum class Str {
     UpdateNoticeAvailable, // «Обновление %ls» в футере
     UpdateNoticeCurrent,   // «Обновлений нет» в футере
     UpdateNoticeError,     // «Ошибка проверки» в футере
+    UpdateAvailableTooltip, // «Доступна новая версия %ls» при наведении на ↑
+    UpdateNoUpdatesTooltip, // «Обновлений нет» при наведении на ↑
 };
 
 namespace L10n {

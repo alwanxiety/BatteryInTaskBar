@@ -21,6 +21,7 @@ struct ContextMenuItem {
     UINT installId = 0;
     bool updateAvailable = false;  // синяя точка на кнопке обновления
     bool updateChecking = false;   // проверка уже идёт
+    std::wstring updateVersion;    // версия для подсказки на ↑
     // Запускает тихую проверку, не закрывая меню. Если пусто — возвращается checkId.
     std::function<void()> onCheck;
 };

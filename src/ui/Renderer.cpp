@@ -87,7 +87,7 @@ void Renderer::DiscardDeviceResources() {
 }
 
 void Renderer::Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme theme, bool systemDark,
-                      float hoverProgress, float animPhase) {
+                      float hoverProgress, float animPhase, bool updateAvailable) {
     const bool dark = IsDarkAppearance(theme, systemDark);
     // Смена темы или системной темы меняет цвета кистей — ресурсы пересоздаём.
     if (m_renderTarget && (theme != m_theme || dark != m_darkAppearance)) DiscardDeviceResources();
@@ -121,7 +121,7 @@ void Renderer::Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme t
     const float scale = size.height / kBaseTileHeight;
     const float pulseAlpha = 0.5f * (sinf(animPhase) + 1.0f);
     DrawMouseCard(D2D1::RectF(0.5f, 0.5f, size.width - 0.5f, size.height - 0.5f), telemetry,
-                  hoverProgress, pulseAlpha, scale, dark);
+                  hoverProgress, pulseAlpha, scale, dark, updateAvailable);
 
     const HRESULT hr = m_renderTarget->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -171,7 +171,7 @@ void Renderer::RenderHeadset(HWND hwnd, const AirPodsTelemetry& airPods, WidgetT
 }
 
 void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& telemetry, float hoverProgress,
-                             float pulseAlpha, float scale, bool dark) {
+                             float pulseAlpha, float scale, bool dark, bool updateAvailable) {
     const float radius = kTileRadius * scale;
     const D2D1_ROUNDED_RECT tileRect = D2D1::RoundedRect(card, radius, radius);
 
@@ -265,6 +265,17 @@ void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& tel
             SetBarColor(m_brushBarFill.Get(), level, pulseAlpha);
         }
         m_renderTarget->FillRoundedRectangle(fillBar, m_brushBarFill.Get());
+    }
+
+    // Маленькая неподвижная точка в правом верхнем углу: «есть обновление».
+    // Рисуем в поле отступа, чтобы не наезжать на проценты и не мигать.
+    if (updateAvailable) {
+        const float radius = 2.2f * scale;
+        const float cx = card.right - 6.0f * scale;
+        const float cy = card.top + 6.0f * scale;
+        m_brushGlow->SetColor(D2D1::ColorF(0.30f, 0.76f, 1.0f, 1.0f));
+        m_renderTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius),
+                                    m_brushGlow.Get());
     }
 }
 

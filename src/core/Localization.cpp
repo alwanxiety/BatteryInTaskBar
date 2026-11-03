@@ -98,9 +98,11 @@ constexpr Entry kStrings[] = {
     /* UpdateNoticeAvailable */ { L"Обновление %ls", L"Update %ls" },
     /* UpdateNoticeCurrent */ { L"Обновлений нет", L"No updates" },
     /* UpdateNoticeError */ { L"Ошибка проверки", L"Check failed" },
+    /* UpdateAvailableTooltip */ { L"Доступна новая версия %ls", L"New version %ls available" },
+    /* UpdateNoUpdatesTooltip */ { L"Обновлений нет", L"No updates" },
 };
 
-static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::UpdateNoticeError) + 1,
+static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::UpdateNoUpdatesTooltip) + 1,
               "таблица строк разошлась с enum Str");
 
 Lang g_lang = Lang::En;

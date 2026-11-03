@@ -38,6 +38,7 @@ constexpr UINT_PTR TIMER_CHECK = 102;
 constexpr UINT_PTR TIMER_HOVER = 103;
 constexpr UINT_PTR TIMER_SNAP  = 104;
 constexpr UINT_PTR TIMER_ZORDER = 105;
+constexpr UINT_PTR TIMER_UPDATE_BADGE = 106;
 constexpr UINT WM_APP_TELEMETRY = WM_APP + 0x51;
 constexpr UINT WM_APP_REPORT_DONE = WM_APP + 0x52;
 constexpr UINT WM_APP_APPS_EDGE = WM_APP + 0x53;
@@ -163,6 +164,10 @@ bool WidgetWindow::Create() {
     }
 
     SetTimer(m_hwnd, TIMER_CHECK, 500, nullptr);
+    // Состояние обновления читаем сразу и потом раз в 5 с: проверка и установка
+    // идут в отдельном процессе, событий от них нет.
+    m_updateAvailable = UpdateState::Read().available;
+    SetTimer(m_hwnd, TIMER_UPDATE_BADGE, 5000, nullptr);
     m_appsEdge.Start(m_hTaskbarWnd, m_hwnd, WM_APP_APPS_EDGE);
     Relayout();
     return true;
@@ -185,6 +190,7 @@ void WidgetWindow::Destroy() {
         KillTimer(m_hwnd, TIMER_CHECK);
         KillTimer(m_hwnd, TIMER_HOVER);
         KillTimer(m_hwnd, TIMER_ZORDER);
+        KillTimer(m_hwnd, TIMER_UPDATE_BADGE);
         DeregisterShellHookWindow(m_hwnd);
         DestroyWindow(m_hwnd);
         m_hwnd = nullptr;
@@ -1095,6 +1101,12 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
         } else if (wParam == TIMER_SNAP) {
             TickSnap(hwnd);
+        } else if (wParam == TIMER_UPDATE_BADGE) {
+            const bool available = UpdateState::Read().available;
+            if (available != m_updateAvailable) {
+                m_updateAvailable = available;
+                if (IsWindowVisible(hwnd)) InvalidateRect(hwnd, nullptr, FALSE);
+            }
         }
         return 0;
 
@@ -1233,7 +1245,7 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
         m_renderer.Render(hwnd, AppState::Instance().GetTelemetry(), m_theme, m_isDarkTheme,
-                          m_hoverProgress, m_animPhase);
+                          m_hoverProgress, m_animPhase, m_updateAvailable);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1372,6 +1384,7 @@ void WidgetWindow::ShowContextMenu(HWND hwnd, HMODULE hInst) {
     footer.checkId = IDM_UPDATE_CHECK;
     footer.installId = IDM_UPDATE_INSTALL;
     footer.updateAvailable = updateState.available;
+    footer.updateVersion = updateState.latest;
     footer.onCheck = [hwnd, hInst]() {
         LaunchUpdater(hwnd, hInst, L"--check-silent");
     };

@@ -30,14 +30,14 @@ public:
     void DiscardDeviceResources();
 
     void Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme theme, bool systemDark,
-                float hoverProgress, float animPhase);
+                float hoverProgress, float animPhase, bool updateAvailable = false);
     void RenderHeadset(HWND hwnd, const AirPodsTelemetry& airPods, WidgetTheme theme, bool systemDark,
                        float hoverProgress, float animPhase);
 
 private:
     void CreateDeviceResources(HWND hwnd, WidgetTheme theme, bool systemDark);
     void DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& telemetry, float hover,
-                       float pulseAlpha, float scale, bool dark);
+                       float pulseAlpha, float scale, bool dark, bool updateAvailable);
     void DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& airPods, float hover,
                          float pulseAlpha, float scale, bool dark);
 

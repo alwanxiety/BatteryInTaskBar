@@ -7,6 +7,7 @@
 #include "core/Diagnostics.h"
 #include "core/Localization.h"
 #include "core/UpdateState.h"
+#include <commctrl.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
@@ -129,6 +130,8 @@ private:
     void DrawChevron(float x, float centerY);
     void DrawFooter(int index, float bodyLeft, float bodyTop, float bodyRight);
     int FooterIndex() const;
+    void CreateFooterTooltips(int footerIndex);
+    void UpdateInstallTooltip();
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT SafeHandle(Win11Menu* self, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -137,6 +140,8 @@ private:
     HINSTANCE m_hInst;
     HWND m_owner{ nullptr };
     HWND m_hwnd{ nullptr };
+    HWND m_tooltip{ nullptr };
+    std::wstring m_tooltipInstallText;
     bool m_dark;
     bool m_submenuStyle{ false };  // панель — подменю (без захвата ввода)
     bool m_openLeft{ false };      // подменю раскрылось влево от пункта
@@ -225,6 +230,8 @@ Win11Menu::~Win11Menu() {
 }
 
 bool Win11Menu::Init() {
+    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
+    InitCommonControlsEx(&icc);
     if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m_d2dFactory.GetAddressOf()))) return false;
     const D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
         D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
@@ -425,6 +432,9 @@ bool Win11Menu::CreateMenuWindow() {
         nullptr, nullptr, m_hInst, this);
     if (!m_hwnd) return false;
 
+    const int footer = FooterIndex();
+    if (footer >= 0) CreateFooterTooltips(footer);
+
     m_showStart = GetTickCount64();
     m_lastTick = m_showStart;
     m_hover = -1;
@@ -479,6 +489,10 @@ bool Win11Menu::CreateRenderTarget() {
 }
 
 void Win11Menu::Cleanup() {
+    if (m_tooltip) {
+        DestroyWindow(m_tooltip);
+        m_tooltip = nullptr;
+    }
     if (m_hwnd) {
         KillTimer(m_hwnd, kTimerFrame);
         if (GetCapture() == m_hwnd) ReleaseCapture();
@@ -718,6 +732,8 @@ void Win11Menu::Tick() {
                 state.checkedAtUnixMs != m_checkLastSeen) {
                 m_items[footer].updateChecking = false;
                 m_items[footer].updateAvailable = state.available;
+                if (state.available) m_items[footer].updateVersion = state.latest;
+                UpdateInstallTooltip();
                 m_noticeUntil = now + 6000;
                 if (state.available) {
                     wchar_t notice[128]{};
@@ -1117,6 +1133,82 @@ int Win11Menu::FooterIndex() const {
         }
     }
     return -1;
+}
+
+void Win11Menu::CreateFooterTooltips(int footerIndex) {
+    if (footerIndex < 0 || footerIndex >= static_cast<int>(m_items.size())) return;
+
+    m_tooltip = CreateWindowExW(
+        WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0, m_hwnd, nullptr,
+        m_hInst, nullptr);
+    if (!m_tooltip) return;
+
+    SetWindowPos(m_tooltip, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SendMessageW(m_tooltip, TTM_SETMAXTIPWIDTH, 0, 280);
+
+    const float shadow = kShadowPad * m_scale;
+    const float checkLeft =
+        (m_contentW - kBodyPadX - kFooterRightPad - kFooterIconSize * 2.0f -
+         kFooterIconGap) * m_scale + shadow;
+    const float updateLeft =
+        checkLeft + (kFooterIconSize + kFooterIconGap) * m_scale;
+    const float top =
+        (m_itemTop[footerIndex] +
+         (m_itemH[footerIndex] - kFooterIconSize) * 0.5f) * m_scale + shadow;
+    const int size = static_cast<int>(std::lround(kFooterIconSize * m_scale));
+
+    auto addTool = [&](UINT id, const RECT& rect, const wchar_t* text) {
+        TOOLINFOW info{ sizeof(info) };
+        info.uFlags = TTF_SUBCLASS;
+        info.hwnd = m_hwnd;
+        info.uId = id;
+        info.rect = rect;
+        info.lpszText = const_cast<LPWSTR>(text);
+        SendMessageW(m_tooltip, TTM_ADDTOOLW, 0,
+                     reinterpret_cast<LPARAM>(&info));
+    };
+
+    const RECT checkRect{
+        static_cast<LONG>(std::lround(checkLeft)),
+        static_cast<LONG>(std::lround(top)),
+        static_cast<LONG>(std::lround(checkLeft)) + size,
+        static_cast<LONG>(std::lround(top)) + size
+    };
+    const RECT updateRect{
+        static_cast<LONG>(std::lround(updateLeft)),
+        static_cast<LONG>(std::lround(top)),
+        static_cast<LONG>(std::lround(updateLeft)) + size,
+        static_cast<LONG>(std::lround(top)) + size
+    };
+
+    addTool(1, checkRect, L10n::Get(Str::CheckUpdates));
+    UpdateInstallTooltip();
+    addTool(2, updateRect, m_tooltipInstallText.c_str());
+}
+
+void Win11Menu::UpdateInstallTooltip() {
+    const int footer = FooterIndex();
+    if (footer < 0) return;
+
+    const auto& item = m_items[footer];
+    if (item.updateAvailable) {
+        wchar_t text[128]{};
+        swprintf_s(text, L10n::Get(Str::UpdateAvailableTooltip),
+                   item.updateVersion.c_str());
+        m_tooltipInstallText = text;
+    } else {
+        m_tooltipInstallText = L10n::Get(Str::UpdateNoUpdatesTooltip);
+    }
+
+    if (!m_tooltip) return;
+    TOOLINFOW info{ sizeof(info) };
+    info.hwnd = m_hwnd;
+    info.uId = 2;
+    info.lpszText = m_tooltipInstallText.data();
+    SendMessageW(m_tooltip, TTM_UPDATETIPTEXTW, 0,
+                 reinterpret_cast<LPARAM>(&info));
 }
 
 void Win11Menu::DrawFooter(int index, float bodyLeft, float bodyTop,

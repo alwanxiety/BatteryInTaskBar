@@ -129,6 +129,7 @@ private:
     bool m_hoverTimerActive{ false };
     bool m_menuOpen{ false };
     bool m_exitRequested{ false };  // WM_CLOSE пришёл, пока было открыто меню
+    bool m_updateAvailable{ false };  // есть обновление: маленькая точка на плитке
     bool m_fullscreenState{ false };
     float m_hoverProgress{ 0.0f };
     float m_hoverTarget{ 0.0f };
