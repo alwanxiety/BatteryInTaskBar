@@ -202,7 +202,7 @@ std::wstring ModuleDirectory() {
 }
 
 /// Версия установленного виджета, а не самого updater.exe. Иначе старый
-/// обновлятор после установки 1.0.8 продолжит видеть «доступно 1.0.8».
+/// обновлятор после установки 1.0.7-beta2 продолжит видеть «доступно 1.0.7-beta2».
 std::wstring InstalledAppVersion() {
     const std::wstring dll = ModuleDirectory() + kDllName;
     DWORD ignored = 0;
@@ -223,10 +223,11 @@ std::wstring InstalledAppVersion() {
     }
 
     wchar_t text[32]{};
-    swprintf_s(text, L"%u.%u.%u",
+    swprintf_s(text, L"%u.%u.%u.%u",
                HIWORD(version->dwFileVersionMS),
                LOWORD(version->dwFileVersionMS),
-               HIWORD(version->dwFileVersionLS));
+               HIWORD(version->dwFileVersionLS),
+               LOWORD(version->dwFileVersionLS));
     return text;
 }
 
@@ -622,20 +623,42 @@ std::vector<int> ParseVersion(const std::wstring& version) {
             parts.push_back(haveValue ? value : 0);
             value = 0;
             haveValue = false;
-            if (parts.size() >= 3) break;
+            if (parts.size() >= 4) break;
         } else if (haveValue) {
             break;
         }
     }
-    if (haveValue && parts.size() < 3) parts.push_back(value);
+    if (haveValue && parts.size() < 4) parts.push_back(value);
     while (parts.size() < 3) parts.push_back(0);
+
+    // У первой опубликованной 1.0.7 beta в ресурсах стояла версия 1.0.7.0.
+    // Чтобы 1.0.7-beta2 считалась новее, номер после «beta» кладём в четвёртый
+    // компонент: beta2 -> 1.0.7.2. Старый updater из первой беты суффикс не
+    // понимает, поэтому ей всё равно нужна установка ZIP вручную.
+    const std::size_t beta = version.find(L"beta");
+    if (beta != std::wstring::npos) {
+        std::size_t pos = beta + 4;
+        int number = 0;
+        bool haveNumber = false;
+        while (pos < version.size() && version[pos] >= L'0' && version[pos] <= L'9') {
+            number = number * 10 + static_cast<int>(version[pos] - L'0');
+            haveNumber = true;
+            ++pos;
+        }
+        if (parts.size() < 4) {
+            parts.push_back(haveNumber ? number : 0);
+        } else if (!haveNumber) {
+            parts[3] = 0;
+        }
+    }
+    while (parts.size() < 4) parts.push_back(0);
     return parts;
 }
 
 int CompareVersions(const std::wstring& left, const std::wstring& right) {
     const std::vector<int> a = ParseVersion(left);
     const std::vector<int> b = ParseVersion(right);
-    for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         if (a[i] != b[i]) return a[i] > b[i] ? 1 : -1;
     }
     return 0;

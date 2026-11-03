@@ -37,11 +37,11 @@ jobs:
             throw "APP_VERSION_STRING not found in res/app_version.h"
           }
           $version = $Matches[1]
-          $tag = "${{ github.ref_name }}"
-          if ($tag -notmatch '^v(\d+\.\d+\.\d+)(?:[-+].*)?$') {
-            throw "Tag $tag does not look like vX.Y.Z[-suffix]"
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+].*)?$') {
+            throw "APP_VERSION_STRING $version does not look like X.Y.Z[-suffix]"
           }
-          if ($Matches[1] -ne $version) {
+          $tag = "${{ github.ref_name }}"
+          if ($tag -ne "v$version") {
             throw "Tag $tag does not match version $version"
           }
 
