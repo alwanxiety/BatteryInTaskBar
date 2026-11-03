@@ -36,9 +36,13 @@ jobs:
           if ($header -notmatch 'APP_VERSION_STRING "([^"]+)"') {
             throw "APP_VERSION_STRING not found in res/app_version.h"
           }
-          $version = "v$($Matches[1])"
-          if ($version -ne "${{ github.ref_name }}") {
-            throw "Tag ${{ github.ref_name }} does not match version $version"
+          $version = $Matches[1]
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)(?:[-+].*)?$') {
+            throw "Tag $tag does not look like vX.Y.Z[-suffix]"
+          }
+          if ($Matches[1] -ne $version) {
+            throw "Tag $tag does not match version $version"
           }
 
       - name: Check SignPath configuration
