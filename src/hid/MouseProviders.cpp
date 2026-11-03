@@ -1,4 +1,5 @@
 #include "hid/MouseProviders.h"
+#include "core/Diagnostics.h"
 #include "hid/BekenStatusProtocol.h"
 #include "hid/RedSquareProtocol.h"
 #include <windows.h>
@@ -677,6 +678,10 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
         // Другое устройство — протокол может отличаться.
         m_devicePid = attr.ProductID;
         m_command = BatteryCommand::Unknown;
+        m_cachedCommandFailures = 0;
+        m_lastLevel = -1;
+        m_lastVoltage = -1;
+        m_lastCharging = false;
     }
 
     // Отчёт движения мыши тоже начинается с 0x08, а байт 1 может совпасть с
@@ -703,6 +708,20 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
         return true;
     };
 
+    auto remember = [&](const DeviceTelemetry& data) {
+        m_lastLevel = data.batteryLevel;
+        m_lastVoltage = data.voltageMv;
+        m_lastCharging = data.isCharging;
+    };
+
+    // Резкий прыжок на 100 % без зарядки — типичный признак ложного ответа
+    // запасной команды/интерфейса. Не даём ему заменить последнее нормальное
+    // значение; после перезапуска виджета проверка начнётся заново.
+    auto suspiciousFull = [&](const DeviceTelemetry& data) {
+        return data.batteryLevel == 100 && !data.isCharging &&
+               m_lastLevel >= 0 && m_lastLevel < 90;
+    };
+
     // Vendor-коллекция ATK/VXE: 17 байт в обе стороны. Страницы 0xFF02 и 0xFF00
     // встречаются в разных ревизиях ресиверов; остальное отсекаем по геометрии отчёта.
     if ((caps.UsagePage == 0xFF02 || caps.UsagePage == 0xFF00) &&
@@ -710,26 +729,69 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
         // Основной протокол — cmd 0x04 (процент, флаг питания, напряжение).
         // У части прошивок работает только 0x17 (шаг 2%): запоминаем удачную команду,
         // чтобы не тратить таймаут на перебор при каждом опросе.
-        const bool legacyFirst = (m_command == BatteryCommand::Legacy);
-        const uint8_t first = legacyFirst ? 0x17 : 0x04;
-        const uint8_t second = legacyFirst ? 0x04 : 0x17;
-
-        DeviceTelemetry fallback;
-        bool ok = readConfirmed(first, outData);
-        if (ok) {
-            m_command = (first == 0x04) ? BatteryCommand::Full : BatteryCommand::Legacy;
+        if (m_command == BatteryCommand::Unknown) {
+            DeviceTelemetry candidate;
+            if (readConfirmed(0x04, candidate)) {
+                outData = std::move(candidate);
+                m_command = BatteryCommand::Full;
+                m_cachedCommandFailures = 0;
+                remember(outData);
+            } else if (readConfirmed(0x17, candidate)) {
+                outData = std::move(candidate);
+                m_command = BatteryCommand::Legacy;
+                m_cachedCommandFailures = 0;
+                remember(outData);
+            } else {
+                return false;
+            }
         } else {
-            ok = readConfirmed(second, fallback);
-            if (ok) {
-                outData = std::move(fallback);
-                m_command = (second == 0x04) ? BatteryCommand::Full : BatteryCommand::Legacy;
+            const uint8_t cachedCommand =
+                (m_command == BatteryCommand::Legacy) ? 0x17 : 0x04;
+            DeviceTelemetry primary;
+            if (readConfirmed(cachedCommand, primary)) {
+                m_cachedCommandFailures = 0;
+                if (suspiciousFull(primary)) {
+                    Diag::Log(L"RedSquare: cached cmd 0x%02X returned 100%% without charging (previous %d%%, voltage %d)",
+                              cachedCommand, m_lastLevel, m_lastVoltage);
+                }
+                outData = std::move(primary);
+                remember(outData);
+            } else {
+                ++m_cachedCommandFailures;
+                // Один таймаут — не повод менять протокол: мышь могла
+                // проснуться/уснуть. Ждём несколько неудач подряд.
+                if (m_cachedCommandFailures < 3) return false;
+
+                const uint8_t alternateCommand =
+                    (m_command == BatteryCommand::Legacy) ? 0x04 : 0x17;
+                DeviceTelemetry alternate;
+                if (!readConfirmed(alternateCommand, alternate)) return false;
+                if (suspiciousFull(alternate)) {
+                    Diag::Log(L"RedSquare: refusing switch to cmd 0x%02X: 100%% without charging (previous %d%%, voltage %d)",
+                              alternateCommand, m_lastLevel, m_lastVoltage);
+                    return false;
+                }
+                outData = std::move(alternate);
+                m_command = (alternateCommand == 0x04) ? BatteryCommand::Full
+                                                       : BatteryCommand::Legacy;
+                m_cachedCommandFailures = 0;
+                remember(outData);
+                Diag::Log(L"RedSquare: command switched to 0x%02X, level=%d%%",
+                          alternateCommand, outData.batteryLevel);
             }
         }
-        if (!ok) return false;
     } else if (caps.UsagePage == 0xFF04 && caps.FeatureReportByteLength >= 8) {
         // 1K-ресиверы некоторых ревизий держат заряд в feature report 0x06
         // (байт 3 — процент, байты 6..7 — напряжение little-endian).
-        if (!QueryFeatureBattery(hDev, caps, outData)) return false;
+        DeviceTelemetry feature;
+        if (!QueryFeatureBattery(hDev, caps, feature)) return false;
+        if (suspiciousFull(feature)) {
+            Diag::Log(L"RedSquare: feature fallback returned 100%% without charging (previous %d%%, voltage %d)",
+                      m_lastLevel, m_lastVoltage);
+            return false;
+        }
+        outData = feature;
+        remember(outData);
     } else {
         return false;
     }

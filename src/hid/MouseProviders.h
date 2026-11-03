@@ -121,6 +121,12 @@ private:
     // Кэш команды привязан к конкретному устройству: у разных ресиверов/мышей
     // протокол может отличаться.
     uint16_t m_devicePid = 0;
+    // Не переключаем рабочую команду из-за одного таймаута: иначе можно
+    // закэшировать запасную команду, которая отвечает правдоподобными 100 %.
+    int m_cachedCommandFailures = 0;
+    int m_lastLevel = -1;
+    int m_lastVoltage = -1;
+    bool m_lastCharging = false;
 };
 
 class BluetoothProvider {
