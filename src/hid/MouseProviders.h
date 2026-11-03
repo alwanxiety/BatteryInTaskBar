@@ -115,7 +115,7 @@ public:
 private:
     enum class BatteryCommand : uint8_t { Unknown, Full, Legacy };
     static bool Exchange17(HANDLE hDev, uint8_t command, std::array<uint8_t, 17>& response) noexcept;
-    static bool QueryFeatureBattery(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) noexcept;
+    bool QueryFeatureBattery(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetry& outData) noexcept;
     static const wchar_t* ModelName(uint16_t vid, uint16_t pid) noexcept;
     BatteryCommand m_command = BatteryCommand::Unknown;
     // Кэш команды привязан к конкретному устройству: у разных ресиверов/мышей
@@ -127,6 +127,7 @@ private:
     int m_lastLevel = -1;
     int m_lastVoltage = -1;
     bool m_lastCharging = false;
+    bool m_featureBadReportLogged = false;
 };
 
 class BluetoothProvider {

@@ -35,4 +35,22 @@ bool Parse(std::uint8_t command, const std::array<std::uint8_t, 17>& response,
     return false;
 }
 
+bool ParseFeature(const std::uint8_t* data, std::size_t size, Reading& out) noexcept {
+    if (data == nullptr || size < 8 || data[0] != 0x06) return false;
+
+    const int level = data[3];
+    if (level > 100) return false;
+
+    // Напряжение обязательно: по одному байту «процента» нельзя отличить
+    // настоящий заряд от другого отчёта с тем же id. У VXE R1 Pro Max
+    // встречается 06 00 00 64 64 64 65 C8 — 100 % и 51301 мВ, то есть мусор.
+    const int millivolts = data[6] | (data[7] << 8);
+    if (millivolts < 2500 || millivolts > 5000) return false;
+
+    out.level = level;
+    out.charging = false;
+    out.voltageMv = millivolts;
+    return true;
+}
+
 }  // namespace RedSquareProtocol

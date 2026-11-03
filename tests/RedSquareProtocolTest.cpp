@@ -126,6 +126,50 @@ int main() {
               "0x04: implausible voltage ignored");
     }
 
+    // Feature report 0x06: обычный отчёт с зарядом и напряжением.
+    {
+        std::array<std::uint8_t, 8> report{ 0x06, 0x00, 0x00, 50, 0, 0, 0x3C, 0x0F };  // 3900 мВ
+        RedSquareProtocol::Reading reading;
+        Check(RedSquareProtocol::ParseFeature(report.data(), report.size(), reading),
+              "feature 0x06: valid answer accepted");
+        Check(reading.level == 50, "feature 0x06: level parsed");
+        Check(reading.voltageMv == 3900, "feature 0x06: voltage parsed");
+        Check(!reading.charging, "feature 0x06: never charging");
+    }
+
+    // Полный заряд с правдоподобным напряжением — валиден.
+    {
+        std::array<std::uint8_t, 8> report{ 0x06, 0x00, 0x00, 100, 0, 0, 0x36, 0x10 };  // 4150 мВ
+        RedSquareProtocol::Reading reading;
+        Check(RedSquareProtocol::ParseFeature(report.data(), report.size(), reading) &&
+                  reading.level == 100 && reading.voltageMv == 4150,
+              "feature 0x06: 100% with plausible voltage accepted");
+    }
+
+    // VXE R1 Pro Max: 100 %, но байты 6..7 дают 51301 мВ. Это не батарейный
+    // отчёт; раньше он принимался и залипал на 100 % до перезапуска виджета.
+    {
+        std::array<std::uint8_t, 8> report{ 0x06, 0x00, 0x00, 0x64, 0x64, 0x64, 0x65, 0xC8 };
+        RedSquareProtocol::Reading reading;
+        Check(!RedSquareProtocol::ParseFeature(report.data(), report.size(), reading),
+              "feature 0x06: false 100% with bogus voltage rejected");
+    }
+
+    // Короткий отчёт, чужой id и заряд больше 100 — не заряд.
+    {
+        std::array<std::uint8_t, 8> report{ 0x06, 0x00, 0x00, 50, 0, 0, 0x3C, 0x0F };
+        RedSquareProtocol::Reading reading;
+        Check(!RedSquareProtocol::ParseFeature(report.data(), 7, reading),
+              "feature 0x06: short report rejected");
+        report[0] = 0x07;
+        Check(!RedSquareProtocol::ParseFeature(report.data(), report.size(), reading),
+              "feature 0x06: wrong report id rejected");
+        report[0] = 0x06;
+        report[3] = 101;
+        Check(!RedSquareProtocol::ParseFeature(report.data(), report.size(), reading),
+              "feature 0x06: level above 100 rejected");
+    }
+
     if (g_failures != 0) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

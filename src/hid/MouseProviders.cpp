@@ -682,6 +682,7 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
         m_lastLevel = -1;
         m_lastVoltage = -1;
         m_lastCharging = false;
+        m_featureBadReportLogged = false;
     }
 
     // Отчёт движения мыши тоже начинается с 0x08, а байт 1 может совпасть с
@@ -716,10 +717,12 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
 
     // Резкий прыжок на 100 % без зарядки — типичный признак ложного ответа
     // запасной команды/интерфейса. Не даём ему заменить последнее нормальное
-    // значение; после перезапуска виджета проверка начнётся заново.
+    // значение; после перезапуска виджета проверка начнётся заново. Порог — любое
+    // значение ниже 100: иначе 90–99 % от основной команды «разрешали» бы
+    // запасной источнике соврать про полный заряд.
     auto suspiciousFull = [&](const DeviceTelemetry& data) {
         return data.batteryLevel == 100 && !data.isCharging &&
-               m_lastLevel >= 0 && m_lastLevel < 90;
+               m_lastLevel >= 0 && m_lastLevel < 100;
     };
 
     // Vendor-коллекция ATK/VXE: 17 байт в обе стороны. Страницы 0xFF02 и 0xFF00
@@ -783,6 +786,10 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
     } else if (caps.UsagePage == 0xFF04 && caps.FeatureReportByteLength >= 8) {
         // 1K-ресиверы некоторых ревизий держат заряд в feature report 0x06
         // (байт 3 — процент, байты 6..7 — напряжение little-endian).
+        // У VXE R1 Pro Max тот же отчёт иногда отдаёт 06 00 00 64 64 64 65 C8:
+        // процент 100, а «напряжение» 51301 мВ — это не батарейный отчёт.
+        // ParseFeature отбрасывает его, иначе плитка залипает на 100 % до
+        // перезапуска виджета.
         DeviceTelemetry feature;
         if (!QueryFeatureBattery(hDev, caps, feature)) return false;
         if (suspiciousFull(feature)) {
@@ -861,16 +868,22 @@ bool RedSquareProvider::QueryFeatureBattery(HANDLE hDev, const HIDP_CAPS& caps, 
     if (length > static_cast<ULONG>(buffer.size())) length = static_cast<ULONG>(buffer.size());
     if (length < 8) return false;
     if (!HidD_GetFeature(hDev, buffer.data(), length)) return false;
-    if (buffer[0] != 0x06) return false;
 
-    const int level = buffer[3];
-    const int millivolts = buffer[6] | (buffer[7] << 8);
-    if (level > 100) return false;
-    // Ноль без правдоподобного напряжения — это «нет данных», а не разряженная мышь.
-    if (level == 0 && (millivolts < 2500 || millivolts > 5000)) return false;
+    RedSquareProtocol::Reading reading;
+    if (!RedSquareProtocol::ParseFeature(buffer.data(), length, reading)) {
+        // Один раз пишем сырой отчёт: по нему видно, что именно прислал
+        // ресивер вместо заряда (у VXE бывает 06 00 00 64 64 64 65 C8).
+        if (!m_featureBadReportLogged && length >= 8) {
+            Diag::Log(L"RedSquare: feature 0x06 rejected (%02X %02X %02X %02X %02X %02X %02X %02X)",
+                      buffer[0], buffer[1], buffer[2], buffer[3],
+                      buffer[4], buffer[5], buffer[6], buffer[7]);
+            m_featureBadReportLogged = true;
+        }
+        return false;
+    }
 
-    outData.batteryLevel = level;
-    if (millivolts >= 2500 && millivolts <= 5000) outData.voltageMv = millivolts;
+    outData.batteryLevel = reading.level;
+    outData.voltageMv = reading.voltageMv;
     outData.isCharging = false;
     return true;
 }

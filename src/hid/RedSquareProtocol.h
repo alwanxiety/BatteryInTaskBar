@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 // Разбор ответа ATK/VXE (17-байтовый vendor-отчёт 0x08). Вынесен отдельно от
@@ -18,5 +19,11 @@ struct Reading {
 [[nodiscard]] bool Parse(std::uint8_t command,
                          const std::array<std::uint8_t, 17>& response,
                          Reading& out) noexcept;
+
+/// Feature report 0x06 (usage page 0xFF04): байт 3 — процент, байты 6..7 —
+/// напряжение little-endian. Отчёт без правдоподобного напряжения не считается
+/// батарейным: у VXE R1 Pro Max он иногда отдаёт «100 %» и мусор в напряжении.
+[[nodiscard]] bool ParseFeature(const std::uint8_t* data, std::size_t size,
+                                Reading& out) noexcept;
 
 }  // namespace RedSquareProtocol
