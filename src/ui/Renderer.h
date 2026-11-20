@@ -36,6 +36,9 @@ public:
 
 private:
     void CreateDeviceResources(HWND hwnd, WidgetTheme theme, bool systemDark);
+    void DrawTextEllipsized(const std::wstring& text, IDWriteTextFormat* format,
+                            IDWriteInlineObject* ellipsis, const D2D1_RECT_F& rect,
+                            ID2D1Brush* brush);
     void DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& telemetry, float hover,
                        float pulseAlpha, float scale, bool dark, bool updateAvailable);
     void DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& airPods, float hover,
@@ -51,6 +54,8 @@ private:
     ComPtr<IDWriteTextFormat> m_textFormatPercent;
     ComPtr<IDWriteTextFormat> m_textFormatSub;
     ComPtr<IDWriteTextFormat> m_textFormatHeadsetTitle;
+    ComPtr<IDWriteInlineObject> m_ellipsisDevice;
+    ComPtr<IDWriteInlineObject> m_ellipsisHeadset;
     ComPtr<ID2D1GradientStopCollection> m_bgStops;
     ComPtr<ID2D1LinearGradientBrush> m_brushBg;
     ComPtr<ID2D1SolidColorBrush> m_brushHover;

@@ -69,6 +69,14 @@ bool Renderer::Initialize() {
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 9.0f, L10n::LocaleName(), m_textFormatHeadsetTitle.GetAddressOf()))) return false;
     if (FAILED(m_textFormatHeadsetTitle->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return false;
 
+    // Имя устройства может не влезть в плитку, особенно когда справа wide-процент.
+    // Многоточие честно показывает обрезку и не даёт принять «PRO X SUPERLIGHT 2 SE»
+    // за другую модель.
+    if (FAILED(m_dwriteFactory->CreateEllipsisTrimmingSign(
+            m_textFormatDevice.Get(), m_ellipsisDevice.GetAddressOf()))) return false;
+    if (FAILED(m_dwriteFactory->CreateEllipsisTrimmingSign(
+            m_textFormatHeadsetTitle.Get(), m_ellipsisHeadset.GetAddressOf()))) return false;
+
     return true;
 }
 
@@ -170,6 +178,27 @@ void Renderer::RenderHeadset(HWND hwnd, const AirPodsTelemetry& airPods, WidgetT
     }
 }
 
+void Renderer::DrawTextEllipsized(const std::wstring& text, IDWriteTextFormat* format,
+                                  IDWriteInlineObject* ellipsis, const D2D1_RECT_F& rect,
+                                  ID2D1Brush* brush) {
+    if (!m_renderTarget || !m_dwriteFactory || text.empty()) return;
+    const float width = (std::max)(rect.right - rect.left, 1.0f);
+    const float height = (std::max)(rect.bottom - rect.top, 1.0f);
+
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(m_dwriteFactory->CreateTextLayout(
+            text.c_str(), static_cast<UINT32>(text.size()), format, width, height,
+            layout.GetAddressOf()))) {
+        return;
+    }
+    if (ellipsis) {
+        const DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+        layout->SetTrimming(&trimming, ellipsis);
+    }
+    m_renderTarget->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout.Get(), brush,
+                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
 void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& telemetry, float hoverProgress,
                              float pulseAlpha, float scale, bool dark, bool updateAvailable) {
     const float radius = kTileRadius * scale;
@@ -211,17 +240,19 @@ void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& tel
     // на языке системы, а не пустое место.
     const std::wstring displayName =
         telemetry.deviceName.empty() ? std::wstring(L10n::Get(Str::DeviceGeneric)) : telemetry.deviceName;
-    // «100% (?)» шире обычного «100%»: заранее освобождаем место, иначе
-    // подпись устройства и процент наедут друг на друга.
+    // Процент всегда занимает одинаковую ширину: «(?)» ушёл в меню, где уже
+    // есть строка «Заряд не менялся больше суток». Иначе на плите с длинным
+    // именем модели не хватало места и «PRO X SUPERLIGHT 2 SE» выглядел как
+    // другая мышь — «PRO X SUPERLIGHT».
     const float percentRight = card.right - kPaddingX * scale;
-    const float percentLeft = card.right - (telemetry.levelStale ? 76.0f : 46.0f) * scale;
+    const float percentLeft = card.right - 46.0f * scale;
     const float nameRight = percentLeft - 4.0f * scale;
-    m_renderTarget->DrawText(displayName.c_str(), static_cast<UINT32>(displayName.length()), m_textFormatDevice.Get(),
-        D2D1::RectF(card.left + kPaddingX * scale, 4.0f * scale, nameRight, 19.0f * scale),
-        m_brushTextPrimary.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    DrawTextEllipsized(displayName, m_textFormatDevice.Get(), m_ellipsisDevice.Get(),
+                       D2D1::RectF(card.left + kPaddingX * scale, 4.0f * scale,
+                                   nameRight, 19.0f * scale),
+                       m_brushTextPrimary.Get());
 
-    std::wstring percStr = hasLevel ? (std::to_wstring(level) + L"%") : L"…";
-    if (hasLevel && telemetry.levelStale) percStr += L" (?)";
+    const std::wstring percStr = hasLevel ? (std::to_wstring(level) + L"%") : L"…";
     m_renderTarget->DrawText(percStr.c_str(), static_cast<UINT32>(percStr.length()), m_textFormatPercent.Get(),
         D2D1::RectF(percentLeft, 3.5f * scale, percentRight, 19.0f * scale),
         m_brushTextPrimary.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
@@ -236,6 +267,9 @@ void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& tel
         subStr = telemetry.isCharging ? L10n::Get(Str::SubCharging)
                                       : (hasLevel ? L10n::Get(Str::SubConnected) : L"---");
     }
+    // Маркер «заряд не менялся» переносим на вторую строку: в первой он
+    // отбирал место у имени модели.
+    if (hasLevel && telemetry.levelStale) subStr += L" (?)";
 
     m_renderTarget->DrawText(subStr.c_str(), static_cast<UINT32>(subStr.length()), m_textFormatSub.Get(),
         D2D1::RectF(card.left + kPaddingX * scale, 15.0f * scale, card.right - kPaddingX * scale, 28.0f * scale),
@@ -313,9 +347,10 @@ void Renderer::DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& 
 
     const std::wstring name = airPods.deviceName.empty() ? std::wstring(L10n::Get(Str::HeadsetName))
                                                          : airPods.deviceName;
-    m_renderTarget->DrawText(name.c_str(), static_cast<UINT32>(name.length()), m_textFormatHeadsetTitle.Get(),
-        D2D1::RectF(card.left + kPaddingX * scale, 3.5f * scale, card.right - 46.0f * scale, 19.0f * scale),
-        m_brushTextPrimary.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    DrawTextEllipsized(name, m_textFormatHeadsetTitle.Get(), m_ellipsisHeadset.Get(),
+                       D2D1::RectF(card.left + kPaddingX * scale, 3.5f * scale,
+                                   card.right - 46.0f * scale, 19.0f * scale),
+                       m_brushTextPrimary.Get());
 
     const std::wstring percent = hasLevel ? (std::to_wstring(level) + L"%") : L"…";
     m_renderTarget->DrawText(percent.c_str(), static_cast<UINT32>(percent.length()), m_textFormatPercent.Get(),
