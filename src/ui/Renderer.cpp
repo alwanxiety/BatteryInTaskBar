@@ -130,7 +130,7 @@ void Renderer::Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme t
     const float pulseAlpha =
         0.5f * (sinf(animPhase) + 1.0f) * std::clamp(pulseAmount, 0.0f, 1.0f);
     DrawMouseCard(D2D1::RectF(0.5f, 0.5f, size.width - 0.5f, size.height - 0.5f), telemetry,
-                  hoverProgress, pulseAlpha, scale, dark, updateAvailable);
+                  hoverProgress, pulseAlpha, scale, dark, updateAvailable, pulseAmount);
 
     const HRESULT hr = m_renderTarget->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -171,7 +171,7 @@ void Renderer::RenderHeadset(HWND hwnd, const AirPodsTelemetry& airPods, WidgetT
     const float pulseAlpha =
         0.5f * (sinf(animPhase) + 1.0f) * std::clamp(pulseAmount, 0.0f, 1.0f);
     DrawHeadsetCard(D2D1::RectF(0.5f, 0.5f, size.width - 0.5f, size.height - 0.5f), airPods,
-                    hoverProgress, pulseAlpha, scale, dark);
+                    hoverProgress, pulseAlpha, scale, dark, pulseAmount);
 
     const HRESULT hr = m_renderTarget->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -202,7 +202,8 @@ void Renderer::DrawTextEllipsized(const std::wstring& text, IDWriteTextFormat* f
 }
 
 void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& telemetry, float hoverProgress,
-                             float pulseAlpha, float scale, bool dark, bool updateAvailable) {
+                             float pulseAlpha, float scale, bool dark, bool updateAvailable,
+                             float pulseAmount) {
     const float radius = kTileRadius * scale;
     const D2D1_ROUNDED_RECT tileRect = D2D1::RoundedRect(card, radius, radius);
 
@@ -225,12 +226,28 @@ void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& tel
         m_renderTarget->FillRoundedRectangle(tileRect, m_brushHover.Get());
     }
 
-    // Низкий заряд показываем цветом полосы, без красной рамки и заливки всей
-    // плитки: рамка слишком бросается в глаза и перекрывает содержимое.
+    // Красная рамка и заливка живут только пока идёт пульсация. После
+    // 15 секунд амплитуда гаснет до нуля — остаются обычная рамка и красная
+    // полоса заряда.
+    const float glowAmount = std::clamp(pulseAmount, 0.0f, 1.0f);
+    const bool lowPulse = hasLevel && level <= 15 && !telemetry.isCharging &&
+                          glowAmount > 0.0f;
+    if (lowPulse) {
+        m_brushGlow->SetColor(D2D1::ColorF(
+            1.0f, 0.15f, 0.15f, (0.10f + 0.20f * pulseAlpha) * glowAmount));
+        m_renderTarget->FillRoundedRectangle(tileRect, m_brushGlow.Get());
+    }
+
     const float boost = 0.14f * hover;
     m_brushBorder->SetColor(dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f + boost)
                                  : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f + boost * 0.7f));
     m_renderTarget->DrawRoundedRectangle(tileRect, m_brushBorder.Get(), 1.0f);
+
+    if (lowPulse) {
+        m_brushGlow->SetColor(D2D1::ColorF(
+            1.0f, 0.20f, 0.20f, (0.30f + 0.40f * pulseAlpha) * glowAmount));
+        m_renderTarget->DrawRoundedRectangle(tileRect, m_brushGlow.Get(), 1.5f * scale);
+    }
 
     // Устройство могло не сообщить модель — тогда показываем нейтральную подпись
     // на языке системы, а не пустое место.
@@ -310,7 +327,7 @@ void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& tel
 }
 
 void Renderer::DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& airPods, float hoverProgress,
-                               float pulseAlpha, float scale, bool dark) {
+                               float pulseAlpha, float scale, bool dark, float pulseAmount) {
     const float radius = kTileRadius * scale;
     const D2D1_ROUNDED_RECT tileRect = D2D1::RoundedRect(card, radius, radius);
 
@@ -328,11 +345,25 @@ void Renderer::DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& 
         m_renderTarget->FillRoundedRectangle(tileRect, m_brushHover.Get());
     }
 
-    // Без красной рамки/заливки: низкий заряд виден по цвету полосы.
+    // Красная рамка/заливка — только на время пульсации, потом исчезают.
+    const float glowAmount = std::clamp(pulseAmount, 0.0f, 1.0f);
+    const bool lowPulse = hasLevel && level <= 15 && glowAmount > 0.0f;
+    if (lowPulse) {
+        m_brushGlow->SetColor(D2D1::ColorF(
+            1.0f, 0.15f, 0.15f, (0.10f + 0.20f * pulseAlpha) * glowAmount));
+        m_renderTarget->FillRoundedRectangle(tileRect, m_brushGlow.Get());
+    }
+
     const float boost = 0.14f * hover;
     m_brushBorder->SetColor(dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f + boost)
                                  : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f + boost * 0.7f));
     m_renderTarget->DrawRoundedRectangle(tileRect, m_brushBorder.Get(), 1.0f);
+
+    if (lowPulse) {
+        m_brushGlow->SetColor(D2D1::ColorF(
+            1.0f, 0.20f, 0.20f, (0.30f + 0.40f * pulseAlpha) * glowAmount));
+        m_renderTarget->DrawRoundedRectangle(tileRect, m_brushGlow.Get(), 1.5f * scale);
+    }
 
     const std::wstring name = airPods.deviceName.empty() ? std::wstring(L10n::Get(Str::HeadsetName))
                                                          : airPods.deviceName;

@@ -41,9 +41,10 @@ private:
                             IDWriteInlineObject* ellipsis, const D2D1_RECT_F& rect,
                             ID2D1Brush* brush);
     void DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& telemetry, float hover,
-                       float pulseAlpha, float scale, bool dark, bool updateAvailable);
+                       float pulseAlpha, float scale, bool dark, bool updateAvailable,
+                       float pulseAmount);
     void DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& airPods, float hover,
-                         float pulseAlpha, float scale, bool dark);
+                         float pulseAlpha, float scale, bool dark, float pulseAmount);
 
     WidgetTheme m_theme{ WidgetTheme::Glass };
     bool m_darkAppearance{ true };  // итоговая «темнота» с учётом системной темы для Glass
