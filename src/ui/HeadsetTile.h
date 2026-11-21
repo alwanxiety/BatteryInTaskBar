@@ -27,7 +27,7 @@ public:
 
     void Invalidate();
     void DiscardDeviceResources();
-    void TickAnimation(float phase);
+    void TickAnimation(float phase, float pulseAmount);
     /// Нужна ли этой плитке пульсация прямо сейчас (общая анимация виджета
     /// не должна перерисовывать наушники, если пульсирует мышь).
     void SetAnimation(bool needed) noexcept { m_animNeeded = needed; }
@@ -115,6 +115,7 @@ private:
     bool m_hoverTimerActive{ false };
     ULONGLONG m_hoverLastTick{ 0 };
     float m_animPhase{ 0.0f };
+    float m_pulseAmount{ 0.0f };
     bool m_animNeeded{ false };
 
     bool m_transitionActive{ false };

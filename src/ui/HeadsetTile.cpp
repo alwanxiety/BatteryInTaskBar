@@ -324,8 +324,9 @@ void HeadsetTile::ForceRestore() const {
     }
 }
 
-void HeadsetTile::TickAnimation(float phase) {
+void HeadsetTile::TickAnimation(float phase, float pulseAmount) {
     m_animPhase = phase;
+    m_pulseAmount = pulseAmount;
     // Перерисовываем только когда пульсирует сама плитка наушников: при
     // заряжающейся мыши окно наушников иначе мигало 30 раз в секунду зря.
     if (m_animNeeded && IsVisible()) InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -647,7 +648,7 @@ LRESULT HeadsetTile::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
         m_renderer.RenderHeadset(hwnd, AppState::Instance().GetAirPods(), m_owner.CurrentTheme(),
-                                 m_owner.SystemDark(), m_hoverProgress, m_animPhase);
+                                 m_owner.SystemDark(), m_hoverProgress, m_animPhase, m_pulseAmount);
         EndPaint(hwnd, &ps);
         return 0;
     }

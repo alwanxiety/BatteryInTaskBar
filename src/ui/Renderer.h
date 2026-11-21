@@ -30,9 +30,10 @@ public:
     void DiscardDeviceResources();
 
     void Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme theme, bool systemDark,
-                float hoverProgress, float animPhase, bool updateAvailable = false);
+                float hoverProgress, float animPhase, bool updateAvailable = false,
+                float pulseAmount = 1.0f);
     void RenderHeadset(HWND hwnd, const AirPodsTelemetry& airPods, WidgetTheme theme, bool systemDark,
-                       float hoverProgress, float animPhase);
+                       float hoverProgress, float animPhase, float pulseAmount = 1.0f);
 
 private:
     void CreateDeviceResources(HWND hwnd, WidgetTheme theme, bool systemDark);

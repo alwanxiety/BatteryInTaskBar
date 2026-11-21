@@ -68,6 +68,7 @@ private:
     void UnregisterWindowClass();
     void RefreshAnimationState();
     void UpdateAnimationTimer(bool needAnim);
+    void UpdatePulseAmount(ULONGLONG now);
     bool IsFullscreenAppActive() const noexcept;
     bool IsTaskbarShowing() const noexcept;
     static bool QuerySystemIsDark() noexcept;
@@ -125,6 +126,7 @@ private:
     bool m_isDarkTheme{ true };                 // системная тема (для Glass и меню)
     bool m_animActive{ false };
     float m_animPhase{ 0.0f };
+    float m_pulseAmount{ 0.0f };  // 1 — полная пульсация, 0 — спокойное свечение
     bool m_hoverTracking{ false };
     bool m_hoverTimerActive{ false };
     bool m_menuOpen{ false };

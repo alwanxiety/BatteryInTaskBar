@@ -57,10 +57,11 @@ constexpr float kWidgetMarginDip = 4.0f;
 constexpr float kSlotGapDip = 8.0f;
 constexpr int kDragThresholdPx = 3;
 constexpr int kSnapDurationMs = 140;
-// Сколько времени работает пульсация после смены состояния. Дальше плитка
-// остаётся статичной: иначе заряжающаяся мышка рисует 30 кадров в секунду
-// часами и будит GPU Explorer'а.
-constexpr ULONGLONG kPulseWindowMs = 60 * 1000;
+// Сколько времени работает пульсация после смены состояния. Дальше амплитуда
+// плавно гасится, и плитка остаётся со спокойным статичным свечением: иначе
+// заряжающаяся мышка рисует 30 кадров в секунду часами и будит GPU Explorer'а.
+constexpr ULONGLONG kPulseWindowMs = 15 * 1000;
+constexpr ULONGLONG kPulseFadeMs = 1500;
 
 enum ZBID : DWORD {
     ZBID_IMMERSIVE_NOTIFICATION = 4,
@@ -906,12 +907,17 @@ void WidgetWindow::RefreshAnimationState() {
                         telemetry.batteryLevel <= 15));
     const bool needAnim = visible && (mouseLowOrCharging || podsLow);
 
-    // Пульсация нужна как визуальный сигнал о смене состояния, а не как вечный
-    // источник 30 кадров в секунду. Даём ей минуту после включения.
+    // Пульсация — визуальный сигнал о смене состояния, а не вечный источник
+    // 30 кадров в секунду. 15 секунд пульсируем, затем плавно гасим амплитуду
+    // до спокойного статичного свечения.
     const ULONGLONG now = GetTickCount64();
-    if (needAnim && !m_lastNeedAnim) m_animDeadline = now + kPulseWindowMs;
+    if (needAnim && !m_lastNeedAnim) {
+        m_animDeadline = now + kPulseWindowMs;
+        m_pulseAmount = 1.0f;
+    }
     m_lastNeedAnim = needAnim;
-    const bool pulsing = needAnim && now < m_animDeadline;
+    UpdatePulseAmount(now);
+    const bool pulsing = needAnim && now < m_animDeadline + kPulseFadeMs;
 
     UpdateAnimationTimer(pulsing);
 
@@ -922,6 +928,23 @@ void WidgetWindow::RefreshAnimationState() {
         m_headsetAnimNeeded = headsetPulsing;
         m_headset.SetAnimation(headsetPulsing);
     }
+}
+
+void WidgetWindow::UpdatePulseAmount(ULONGLONG now) {
+    if (!m_lastNeedAnim) {
+        m_pulseAmount = 0.0f;
+        return;
+    }
+    if (now <= m_animDeadline) {
+        m_pulseAmount = 1.0f;
+        return;
+    }
+    const ULONGLONG faded = now - m_animDeadline;
+    if (faded >= kPulseFadeMs) {
+        m_pulseAmount = 0.0f;
+        return;
+    }
+    m_pulseAmount = 1.0f - static_cast<float>(faded) / static_cast<float>(kPulseFadeMs);
 }
 
 void WidgetWindow::NotifyTelemetryChanged() const noexcept {
@@ -1035,10 +1058,15 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 UpdateAnimationTimer(false);
                 return 0;
             }
+            const ULONGLONG now = GetTickCount64();
+            UpdatePulseAmount(now);
             m_animPhase += 0.12f;
             if (m_animPhase > 6.283185f) m_animPhase -= 6.283185f;
             InvalidateRect(hwnd, nullptr, FALSE);
-            m_headset.TickAnimation(m_animPhase);
+            m_headset.TickAnimation(m_animPhase, m_pulseAmount);
+            // Погасили — больше нечего анимировать. Кадр с нулевой амплитудой
+            // уже поставлен в очередь отрисовки.
+            if (m_pulseAmount <= 0.0f) UpdateAnimationTimer(false);
         } else if (wParam == TIMER_CHECK) {
             // Страховочный опрос раз в 500 мс: событие переднего плана могло не дойти.
             const bool fullscreen = IsFullscreenAppActive();
@@ -1245,7 +1273,7 @@ LRESULT WidgetWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         PAINTSTRUCT ps;
         BeginPaint(hwnd, &ps);
         m_renderer.Render(hwnd, AppState::Instance().GetTelemetry(), m_theme, m_isDarkTheme,
-                          m_hoverProgress, m_animPhase, m_updateAvailable);
+                          m_hoverProgress, m_animPhase, m_updateAvailable, m_pulseAmount);
         EndPaint(hwnd, &ps);
         return 0;
     }

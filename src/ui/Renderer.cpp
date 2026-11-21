@@ -95,7 +95,7 @@ void Renderer::DiscardDeviceResources() {
 }
 
 void Renderer::Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme theme, bool systemDark,
-                      float hoverProgress, float animPhase, bool updateAvailable) {
+                      float hoverProgress, float animPhase, bool updateAvailable, float pulseAmount) {
     const bool dark = IsDarkAppearance(theme, systemDark);
     // Смена темы или системной темы меняет цвета кистей — ресурсы пересоздаём.
     if (m_renderTarget && (theme != m_theme || dark != m_darkAppearance)) DiscardDeviceResources();
@@ -127,7 +127,8 @@ void Renderer::Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme t
     m_renderTarget->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
     const float scale = size.height / kBaseTileHeight;
-    const float pulseAlpha = 0.5f * (sinf(animPhase) + 1.0f);
+    const float pulseAlpha =
+        0.5f * (sinf(animPhase) + 1.0f) * std::clamp(pulseAmount, 0.0f, 1.0f);
     DrawMouseCard(D2D1::RectF(0.5f, 0.5f, size.width - 0.5f, size.height - 0.5f), telemetry,
                   hoverProgress, pulseAlpha, scale, dark, updateAvailable);
 
@@ -139,7 +140,7 @@ void Renderer::Render(HWND hwnd, const DeviceTelemetry& telemetry, WidgetTheme t
 }
 
 void Renderer::RenderHeadset(HWND hwnd, const AirPodsTelemetry& airPods, WidgetTheme theme, bool systemDark,
-                             float hoverProgress, float animPhase) {
+                             float hoverProgress, float animPhase, float pulseAmount) {
     const bool dark = IsDarkAppearance(theme, systemDark);
     if (m_renderTarget && (theme != m_theme || dark != m_darkAppearance)) DiscardDeviceResources();
     CreateDeviceResources(hwnd, theme, systemDark);
@@ -167,7 +168,8 @@ void Renderer::RenderHeadset(HWND hwnd, const AirPodsTelemetry& airPods, WidgetT
     m_renderTarget->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
     const float scale = size.height / kBaseTileHeight;
-    const float pulseAlpha = 0.5f * (sinf(animPhase) + 1.0f);
+    const float pulseAlpha =
+        0.5f * (sinf(animPhase) + 1.0f) * std::clamp(pulseAmount, 0.0f, 1.0f);
     DrawHeadsetCard(D2D1::RectF(0.5f, 0.5f, size.width - 0.5f, size.height - 0.5f), airPods,
                     hoverProgress, pulseAlpha, scale, dark);
 
