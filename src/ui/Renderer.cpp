@@ -225,18 +225,12 @@ void Renderer::DrawMouseCard(const D2D1_RECT_F& card, const DeviceTelemetry& tel
         m_renderTarget->FillRoundedRectangle(tileRect, m_brushHover.Get());
     }
 
-    if (hasLevel && level <= 15 && !telemetry.isCharging) {
-        m_brushGlow->SetColor(D2D1::ColorF(1.0f, 0.15f, 0.15f, 0.10f + 0.20f * pulseAlpha));
-        m_renderTarget->FillRoundedRectangle(tileRect, m_brushGlow.Get());
-
-        m_brushGlow->SetColor(D2D1::ColorF(1.0f, 0.20f, 0.20f, 0.30f + 0.40f * pulseAlpha));
-        m_renderTarget->DrawRoundedRectangle(tileRect, m_brushGlow.Get(), 1.5f * scale);
-    } else {
-        const float boost = 0.14f * hover;
-        m_brushBorder->SetColor(dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f + boost)
-                                     : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f + boost * 0.7f));
-        m_renderTarget->DrawRoundedRectangle(tileRect, m_brushBorder.Get(), 1.0f);
-    }
+    // Низкий заряд показываем цветом полосы, без красной рамки и заливки всей
+    // плитки: рамка слишком бросается в глаза и перекрывает содержимое.
+    const float boost = 0.14f * hover;
+    m_brushBorder->SetColor(dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f + boost)
+                                 : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f + boost * 0.7f));
+    m_renderTarget->DrawRoundedRectangle(tileRect, m_brushBorder.Get(), 1.0f);
 
     // Устройство могло не сообщить модель — тогда показываем нейтральную подпись
     // на языке системы, а не пустое место.
@@ -322,7 +316,6 @@ void Renderer::DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& 
 
     const int level = HeadsetAverage(airPods);
     const bool hasLevel = level >= 0;
-    const bool low = hasLevel && level <= 15;
 
     m_brushBg->SetStartPoint(D2D1::Point2F(0.0f, 0.0f));
     m_brushBg->SetEndPoint(D2D1::Point2F(0.0f, card.bottom));
@@ -335,17 +328,11 @@ void Renderer::DrawHeadsetCard(const D2D1_RECT_F& card, const AirPodsTelemetry& 
         m_renderTarget->FillRoundedRectangle(tileRect, m_brushHover.Get());
     }
 
-    if (low) {
-        m_brushGlow->SetColor(D2D1::ColorF(1.0f, 0.15f, 0.15f, 0.10f + 0.20f * pulseAlpha));
-        m_renderTarget->FillRoundedRectangle(tileRect, m_brushGlow.Get());
-        m_brushGlow->SetColor(D2D1::ColorF(1.0f, 0.20f, 0.20f, 0.30f + 0.40f * pulseAlpha));
-        m_renderTarget->DrawRoundedRectangle(tileRect, m_brushGlow.Get(), 1.5f * scale);
-    } else {
-        const float boost = 0.14f * hover;
-        m_brushBorder->SetColor(dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f + boost)
-                                     : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f + boost * 0.7f));
-        m_renderTarget->DrawRoundedRectangle(tileRect, m_brushBorder.Get(), 1.0f);
-    }
+    // Без красной рамки/заливки: низкий заряд виден по цвету полосы.
+    const float boost = 0.14f * hover;
+    m_brushBorder->SetColor(dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f + boost)
+                                 : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f + boost * 0.7f));
+    m_renderTarget->DrawRoundedRectangle(tileRect, m_brushBorder.Get(), 1.0f);
 
     const std::wstring name = airPods.deviceName.empty() ? std::wstring(L10n::Get(Str::HeadsetName))
                                                          : airPods.deviceName;
