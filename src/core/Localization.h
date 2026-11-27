@@ -81,6 +81,7 @@ enum class Str {
     UpdateNoticeError,     // «Ошибка проверки» в футере
     UpdateAvailableTooltip, // «Доступна новая версия %ls» при наведении на ↑
     UpdateNoUpdatesTooltip, // «Обновлений нет» при наведении на ↑
+    UpdateWidgetStartFailed, // «Виджет не запустился после обновления»
 };
 
 namespace L10n {

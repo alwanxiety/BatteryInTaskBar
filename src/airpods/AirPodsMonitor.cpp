@@ -521,11 +521,57 @@ struct AirPodsMonitor::Impl {
         }
     }
 
+    void SeedFromCache() {
+        const AirPodsTelemetry cached = AppState::Instance().GetAirPods();
+        if (!cached.HasAnyLevel()) return;
+
+        std::lock_guard lock(mutex);
+        if (leftLevel >= 0 || rightLevel >= 0 || caseLevel >= 0) return;
+
+        deviceName = cached.deviceName;
+        leftLevel = cached.leftLevel;
+        rightLevel = cached.rightLevel;
+        caseLevel = cached.caseLevel;
+        leftCharging = cached.leftCharging;
+        rightCharging = cached.rightCharging;
+        caseCharging = cached.caseCharging;
+
+        const std::uint64_t seen = cached.lastSeenUnixMs != 0
+                                       ? cached.lastSeenUnixMs
+                                       : cached.lastSuccessUnixMs;
+        if (seen != 0) {
+            leftSeenMs = seen;
+            rightSeenMs = seen;
+            caseSeenMs = seen;
+            lastAdvertUnixMs = seen;
+        }
+        lastSuccessUnixMs = cached.lastSuccessUnixMs != 0
+                                ? cached.lastSuccessUnixMs
+                                : seen;
+        Diag::Log(L"airpods: restored cached levels, name=%ls L=%d R=%d C=%d",
+                  deviceName.c_str(), leftLevel, rightLevel, caseLevel);
+    }
+
     void Publish() {
         AirPodsTelemetry telemetry;
         {
             std::lock_guard lock(mutex);
             const std::uint64_t now = NowUnixMs();
+            // Кэш мог быть восстановлен после рестарта Explorer. Не держим
+            // старые уровни вечно: компонент без рекламы 15 минут неизвестен.
+            constexpr std::uint64_t kComponentTtlMs = 15 * 60 * 1000;
+            if (leftSeenMs != 0 && now >= leftSeenMs && now - leftSeenMs > kComponentTtlMs) {
+                leftLevel = -1;
+                leftCharging = false;
+            }
+            if (rightSeenMs != 0 && now >= rightSeenMs && now - rightSeenMs > kComponentTtlMs) {
+                rightLevel = -1;
+                rightCharging = false;
+            }
+            if (caseSeenMs != 0 && now >= caseSeenMs && now - caseSeenMs > kComponentTtlMs) {
+                caseLevel = -1;
+                caseCharging = false;
+            }
             telemetry.deviceName = deviceName;
             telemetry.leftLevel = leftLevel;
             telemetry.rightLevel = rightLevel;
@@ -564,12 +610,14 @@ struct AirPodsMonitor::Impl {
 
     // Разбор Apple Continuity-сообщения 0x07 (AirPods). Раскладка:
     //   [0] тип 0x07, [1] длина, [2] режим, [3..4] модель, [5] статус,
-    //   [6] заряд наушников, [7] кейс (старший полубайт) + флаги (младший),
+    //   [6] заряд наушников: младший полубайт — primary, старший — secondary,
+    //   [7] младший полубайт — заряд кейса, биты 4/5/6 — флаги зарядки
+    //       primary/secondary/кейса,
     //   [8] крышка, [9] цвет, [10] состояние подключения.
-    // Верхний полубайт [6] относится к «основному» наушнику: бит 5 статуса
-    // говорит, левый он (1) или правый (0), поэтому при правом основном
-    // полубайты меняются местами. Если прошивка пришлёт другой формат, в отчёте
-    // останется hex — парсер можно будет поправить без догадок.
+    // Бит 5 статуса говорит, левый primary (1) или правый (0), поэтому
+    // primary/secondary переводятся в left/right с учётом этого бита.
+    // Если прошивка пришлёт другой формат, в отчёте останется hex — парсер
+    // можно будет поправить без догадок.
     void MergeAppleAdvert(const Advert& advert, std::uint64_t now) {
         const std::vector<std::uint8_t>& data = advert.data;
         if (data.size() < 8) return;
@@ -579,19 +627,23 @@ struct AirPodsMonitor::Impl {
         deviceName = ModelName(model);
 
         const int status = data[5];
+        // Apple-format: low nibble — primary pod, high — secondary; byte 7 low
+        // nibble — case level, high nibble bits 4/5/6 — charging flags for
+        // primary/secondary/case. Старый разбор читал байты зеркально.
         const bool leftPrimary = (status & 0x20) != 0;
 
-        const int upper = DecodeNibble((data[6] >> 4) & 0x0F);
-        const int lower = DecodeNibble(data[6] & 0x0F);
-        const int left = leftPrimary ? upper : lower;
-        const int right = leftPrimary ? lower : upper;
+        const int primary = DecodeNibble(data[6] & 0x0F);
+        const int secondary = DecodeNibble((data[6] >> 4) & 0x0F);
+        const int left = leftPrimary ? primary : secondary;
+        const int right = leftPrimary ? secondary : primary;
 
-        const int casePercent = DecodeNibble((data[7] >> 4) & 0x0F);
-        const int flags = data[7] & 0x0F;
-        bool leftCharging = (flags & 0x02) != 0;
-        bool rightCharging = (flags & 0x01) != 0;
+        const int casePercent = DecodeNibble(data[7] & 0x0F);
+        const int flags = (data[7] >> 4) & 0x0F;
+        const bool primaryCharging = (flags & 0x01) != 0;
+        const bool secondaryCharging = (flags & 0x02) != 0;
         const bool caseCharging = (flags & 0x04) != 0;
-        if (!leftPrimary) std::swap(leftCharging, rightCharging);
+        const bool leftCharging = leftPrimary ? primaryCharging : secondaryCharging;
+        const bool rightCharging = leftPrimary ? secondaryCharging : primaryCharging;
 
         if (left >= 0) {
             leftLevel = left;
@@ -1030,6 +1082,8 @@ struct AirPodsMonitor::Impl {
             std::lock_guard lock(mutex);
             lastError = L"WinRT init failed: " + std::wstring(error.message().c_str());
         }
+
+        SeedFromCache();
 
         if (apartment) {
             StartBtWatcher();

@@ -100,9 +100,10 @@ constexpr Entry kStrings[] = {
     /* UpdateNoticeError */ { L"Ошибка проверки", L"Check failed" },
     /* UpdateAvailableTooltip */ { L"Доступна новая версия %ls", L"New version %ls available" },
     /* UpdateNoUpdatesTooltip */ { L"Обновлений нет", L"No updates" },
+    /* UpdateWidgetStartFailed */ { L"Виджет не запустился после обновления. Перезапустите Explorer и попробуйте снова.", L"The widget did not start after the update. Restart Explorer and try again." },
 };
 
-static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::UpdateNoUpdatesTooltip) + 1,
+static_assert(std::size(kStrings) == static_cast<std::size_t>(Str::UpdateWidgetStartFailed) + 1,
               "таблица строк разошлась с enum Str");
 
 Lang g_lang = Lang::En;

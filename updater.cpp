@@ -7,6 +7,7 @@
 #include <winhttp.h>
 #include <winver.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -214,6 +215,38 @@ std::wstring InstalledAppVersion() {
         return APP_VERSION_WSTRING;
     }
 
+    // ProductVersion сохраняет prerelease-суффикс (1.0.7-beta2), в отличие от
+    // numeric FILEVERSION. Без него stable 1.0.7 выглядит старее beta2 и не
+    // предлагается пользователям беты.
+    struct TranslationEntry {
+        WORD language;
+        WORD codePage;
+    };
+    TranslationEntry* translations = nullptr;
+    UINT translationsLength = 0;
+    if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
+                       reinterpret_cast<LPVOID*>(&translations),
+                       &translationsLength) &&
+        translations &&
+        translationsLength >= sizeof(TranslationEntry)) {
+        const UINT count = translationsLength / sizeof(TranslationEntry);
+        for (UINT i = 0; i < count; ++i) {
+            wchar_t query[64]{};
+            swprintf_s(query, L"\\StringFileInfo\\%04x%04x\\ProductVersion",
+                       translations[i].language, translations[i].codePage);
+            wchar_t* text = nullptr;
+            UINT textLength = 0;
+            if (!VerQueryValueW(data.data(), query,
+                                reinterpret_cast<LPVOID*>(&text), &textLength) ||
+                !text || textLength == 0) {
+                continue;
+            }
+            std::wstring value(text, textLength);
+            while (!value.empty() && value.back() == L'\0') value.pop_back();
+            if (!value.empty()) return value;
+        }
+    }
+
     VS_FIXEDFILEINFO* version = nullptr;
     UINT length = 0;
     if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID*>(&version),
@@ -377,7 +410,7 @@ bool HttpGet(const std::wstring& url, const std::wstring& extraHeaders,
         return false;
     }
 
-    DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
     WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirect,
                      sizeof(redirect));
 
@@ -463,9 +496,17 @@ bool HttpGetFile(const std::wstring& url, const std::wstring& path,
         return false;
     }
 
+    constexpr std::size_t kMaxDownloadBytes = 200u * 1024u * 1024u;
+    std::size_t total = 0;
     bool ok = HttpGet(
         url, L"",
         [&](const char* data, DWORD size, std::wstring&) {
+            if (total > kMaxDownloadBytes ||
+                size > kMaxDownloadBytes - total) {
+                error = L"response is too large";
+                return false;
+            }
+            total += size;
             DWORD written = 0;
             if (!WriteFile(file, data, size, &written, nullptr) ||
                 written != size) {
@@ -611,55 +652,77 @@ bool ParseRelease(const std::string& json, ReleaseInfo& info,
     return true;
 }
 
-std::vector<int> ParseVersion(const std::wstring& version) {
-    std::vector<int> parts;
-    int value = 0;
-    bool haveValue = false;
-    for (const wchar_t c : version) {
-        if (c >= L'0' && c <= L'9') {
-            value = value * 10 + static_cast<int>(c - L'0');
-            haveValue = true;
-        } else if (c == L'.') {
-            parts.push_back(haveValue ? value : 0);
-            value = 0;
-            haveValue = false;
-            if (parts.size() >= 4) break;
-        } else if (haveValue) {
-            break;
-        }
-    }
-    if (haveValue && parts.size() < 4) parts.push_back(value);
-    while (parts.size() < 3) parts.push_back(0);
+struct ParsedVersion {
+    std::array<int, 4> core{};
+    bool prerelease = false;
+    int prereleaseNumber = 0;
+};
 
-    // У первой опубликованной 1.0.7 beta в ресурсах стояла версия 1.0.7.0.
-    // Чтобы 1.0.7-beta2 считалась новее, номер после «beta» кладём в четвёртый
-    // компонент: beta2 -> 1.0.7.2. Старый updater из первой беты суффикс не
-    // понимает, поэтому ей всё равно нужна установка ZIP вручную.
-    const std::size_t beta = version.find(L"beta");
-    if (beta != std::wstring::npos) {
-        std::size_t pos = beta + 4;
-        int number = 0;
-        bool haveNumber = false;
+ParsedVersion ParseVersion(const std::wstring& version) {
+    ParsedVersion parsed;
+    std::size_t pos = 0;
+    if (!version.empty() && (version.front() == L'v' || version.front() == L'V')) {
+        ++pos;
+    }
+
+    constexpr int kMaxPart = 2147483647;
+    for (std::size_t part = 0; part < parsed.core.size(); ++part) {
+        bool haveValue = false;
+        int value = 0;
         while (pos < version.size() && version[pos] >= L'0' && version[pos] <= L'9') {
-            number = number * 10 + static_cast<int>(version[pos] - L'0');
-            haveNumber = true;
+            const int digit = static_cast<int>(version[pos] - L'0');
+            if (value > (kMaxPart - digit) / 10) {
+                value = kMaxPart;
+            } else {
+                value = value * 10 + digit;
+            }
+            haveValue = true;
             ++pos;
         }
-        if (parts.size() < 4) {
-            parts.push_back(haveNumber ? number : 0);
-        } else if (!haveNumber) {
-            parts[3] = 0;
+        if (!haveValue) break;
+        parsed.core[part] = value;
+        if (pos >= version.size() || version[pos] != L'.') break;
+        ++pos;
+    }
+
+    const std::wstring suffix = version.substr(pos);
+    auto contains = [&suffix](const wchar_t* word) {
+        return suffix.find(word) != std::wstring::npos;
+    };
+    parsed.prerelease = contains(L"beta") || contains(L"rc") ||
+                        contains(L"alpha") || contains(L"preview") ||
+                        contains(L"dev");
+
+    if (parsed.prerelease) {
+        const std::size_t dash = suffix.find_first_of(L"0123456789");
+        if (dash != std::wstring::npos) {
+            int number = 0;
+            for (std::size_t i = dash;
+                 i < suffix.size() && suffix[i] >= L'0' && suffix[i] <= L'9';
+                 ++i) {
+                const int digit = static_cast<int>(suffix[i] - L'0');
+                if (number > (kMaxPart - digit) / 10) {
+                    number = kMaxPart;
+                } else {
+                    number = number * 10 + digit;
+                }
+            }
+            parsed.prereleaseNumber = number;
         }
     }
-    while (parts.size() < 4) parts.push_back(0);
-    return parts;
+    return parsed;
 }
 
 int CompareVersions(const std::wstring& left, const std::wstring& right) {
-    const std::vector<int> a = ParseVersion(left);
-    const std::vector<int> b = ParseVersion(right);
-    for (std::size_t i = 0; i < 4; ++i) {
-        if (a[i] != b[i]) return a[i] > b[i] ? 1 : -1;
+    const ParsedVersion a = ParseVersion(left);
+    const ParsedVersion b = ParseVersion(right);
+    for (std::size_t i = 0; i < a.core.size(); ++i) {
+        if (a.core[i] != b.core[i]) return a.core[i] > b.core[i] ? 1 : -1;
+    }
+    // Stable-релиз всегда новее prerelease с тем же core: 1.0.7 > 1.0.7-beta2.
+    if (a.prerelease != b.prerelease) return a.prerelease ? -1 : 1;
+    if (a.prereleaseNumber != b.prereleaseNumber) {
+        return a.prereleaseNumber > b.prereleaseNumber ? 1 : -1;
     }
     return 0;
 }
@@ -1055,10 +1118,15 @@ bool WaitForWidgetStart(DWORD timeoutMs) {
     while (GetTickCount64() < deadline) {
         HWND window = FindWindowW(nullptr, kWidgetWindowTitle);
         if (!window) window = FindWindowW(kLegacyWidgetClassName, nullptr);
-        if (window || IsNamedObjectPresent(kWidgetMutexName)) return true;
+        if (window) return true;
         Sleep(200);
     }
     return false;
+}
+
+void RemoveBackup(const std::wstring& directory, const wchar_t* name) {
+    const std::wstring backup = directory + name + kBackupSuffix;
+    DeleteFileW(backup.c_str());
 }
 
 // --- Установка -------------------------------------------------------------
@@ -1137,35 +1205,77 @@ bool ApplyUpdate(const std::wstring& installDir, const ReleaseInfo& release,
         LogLine(L"checksum ok: %ls %ls", name, actual.c_str());
     }
 
+    RemoveBackup(installDir, kDllName);
+    RemoveBackup(installDir, kInjectorName);
+
+    bool stopped = false;
+    bool dllReplaced = false;
+    bool injectorReplaced = false;
+
+    auto rollback = [&] {
+        if (dllReplaced) RestoreBackup(installDir, kDllName);
+        if (injectorReplaced) RestoreBackup(installDir, kInjectorName);
+        dllReplaced = false;
+        injectorReplaced = false;
+        RemoveBackup(installDir, kDllName);
+        RemoveBackup(installDir, kInjectorName);
+    };
+
+    auto restartOldWidget = [&](std::wstring& detail) {
+        std::wstring restartError;
+        if (!StartInjector(installDir, restartError)) {
+            if (!detail.empty()) detail += L"\n";
+            detail += restartError;
+            return;
+        }
+        if (!WaitForWidgetStart(kWatcherStartTimeoutMs)) {
+            if (!detail.empty()) detail += L"\n";
+            detail += L10n::Get(Str::UpdateWidgetStartFailed);
+        }
+    };
+
+    auto failAfterStop = [&](const std::wstring& failure) {
+        rollback();
+        std::wstring detail = failure;
+        if (stopped && !noStart) restartOldWidget(detail);
+        error = detail;
+        return false;
+    };
+
     if (!noStop) {
         Report(progress, L"%ls", L10n::Get(Str::UpdateInstalling));
         if (!StopRunningApp(error)) return false;
+        stopped = true;
     }
 
     Report(progress, L"%ls", L10n::Get(Str::UpdateInstalling));
     if (!ReplaceWithBackup(installDir, staging, kDllName, error)) {
-        RestoreBackup(installDir, kDllName);
-        RestoreBackup(installDir, kInjectorName);
-        return false;
+        return failAfterStop(error);
     }
+    dllReplaced = true;
     if (!ReplaceWithBackup(installDir, staging, kInjectorName, error)) {
-        RestoreBackup(installDir, kDllName);
-        RestoreBackup(installDir, kInjectorName);
-        return false;
+        return failAfterStop(error);
     }
+    injectorReplaced = true;
 
     if (!noStart) {
         Report(progress, L"%ls", L10n::Get(Str::UpdateRestarting));
         if (!StartInjector(installDir, error)) {
-            RestoreBackup(installDir, kDllName);
-            RestoreBackup(installDir, kInjectorName);
-            StartInjector(installDir, error);
+            return failAfterStop(error);
+        }
+        if (!WaitForWidgetStart(kWatcherStartTimeoutMs)) {
+            LogLine(L"widget did not start after update");
+            StopRunningApp(error);
+            std::wstring detail = L10n::Get(Str::UpdateWidgetStartFailed);
+            rollback();
+            if (stopped) restartOldWidget(detail);
+            error = detail;
             return false;
         }
-        const bool started = WaitForWidgetStart(kWatcherStartTimeoutMs);
-        LogLine(L"widget started after update: %ls", started ? L"yes" : L"no");
     }
 
+    RemoveBackup(installDir, kDllName);
+    RemoveBackup(installDir, kInjectorName);
     LogLine(L"update installed: %ls", release.version.c_str());
     return true;
 }

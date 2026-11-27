@@ -197,6 +197,12 @@ bool ReadInputFrame(HANDLE dev, const HIDP_CAPS& caps, std::vector<uint8_t>& rep
     return ok;
 }
 
+bool ReportIdMatches(UCHAR reportId, const std::vector<uint8_t>& report) {
+    // Для отчётов без report ID первый байт — уже данные. Для нумерованных
+    // проверяем ID, иначе можно разобрать отчёт движения как заряд.
+    return reportId == 0 || (!report.empty() && report[0] == reportId);
+}
+
 bool ReadInputReport(HANDLE dev, const HIDP_CAPS& caps, UCHAR reportId,
                      std::vector<uint8_t>& report) {
     if (caps.InputReportByteLength == 0) return false;
@@ -204,10 +210,16 @@ bool ReadInputReport(HANDLE dev, const HIDP_CAPS& caps, UCHAR reportId,
     report.assign(caps.InputReportByteLength, 0);
     report[0] = reportId;
     // Часть устройств отдаёт последний входной отчёт напрямую.
-    if (HidD_GetInputReport(dev, report.data(), static_cast<ULONG>(report.size()))) return true;
+    if (HidD_GetInputReport(dev, report.data(), static_cast<ULONG>(report.size()))) {
+        return ReportIdMatches(reportId, report);
+    }
 
     // Остальные — только потоком; ждём недолго, опрос не должен залипать.
-    return ReadInputFrame(dev, caps, report, 150);
+    std::vector<uint8_t> frame;
+    if (!ReadInputFrame(dev, caps, frame, 150)) return false;
+    if (!ReportIdMatches(reportId, frame)) return false;
+    report = std::move(frame);
+    return true;
 }
 
 }  // namespace
@@ -369,7 +381,7 @@ bool LogitechProvider::SendPacket(HANDLE hDev, const ReportSizes& sizes, uint8_t
         sent = WaitForIo(hDev, writeOv, 75, written);
     }
     CloseHandle(writeOv.hEvent);
-    if (!sent) return false;
+    if (!sent || written != sizes.outputLen) return false;
 
     std::array<uint8_t, 256> response{};
     OVERLAPPED readOv{};
@@ -792,11 +804,10 @@ bool RedSquareProvider::Query(HANDLE hDev, const HIDP_CAPS& caps, DeviceTelemetr
         // перезапуска виджета.
         DeviceTelemetry feature;
         if (!QueryFeatureBattery(hDev, caps, feature)) return false;
-        if (suspiciousFull(feature)) {
-            Diag::Log(L"RedSquare: feature fallback returned 100%% without charging (previous %d%%, voltage %d)",
-                      m_lastLevel, m_lastVoltage);
-            return false;
-        }
+        // Feature-отчёт не содержит признака зарядки. Если предыдущее значение
+        // пришло из этого же источника, настоящие 100 % после 99 % нельзя
+        // считать подозрительными: иначе заряд навсегда остаётся на 99 %.
+        // Поддельный отчёт 0x06 уже отбрасывается ParseFeature по напряжению.
         outData = feature;
         remember(outData);
     } else {
@@ -828,7 +839,7 @@ bool RedSquareProvider::Exchange17(HANDLE hDev, uint8_t command, std::array<uint
         sent = WaitForIo(hDev, writeOv, 100, written);
     }
     CloseHandle(writeOv.hEvent);
-    if (!sent) return false;
+    if (!sent || written != static_cast<DWORD>(request.size())) return false;
 
     // Ответ приходит отдельным input-отчётом; чужие отчёты (движение мыши)
     // пропускаем, пока не истечёт короткий таймаут. Спящая мышь просто не ответит.

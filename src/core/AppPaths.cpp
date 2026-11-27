@@ -30,7 +30,18 @@ void EnsureDirectory() {
 
     std::wstring directory = base + L"\\BatteryInTaskBar";
     CreateDirectoryW(directory.c_str(), nullptr);  // уже существует — это норма
+    const DWORD attributes = GetFileAttributesW(directory.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return;
+    }
     g_directory = std::move(directory);
+}
+
+bool WriteExact(HANDLE file, const void* data, DWORD size) {
+    DWORD written = 0;
+    return WriteFile(file, data, size, &written, nullptr) != FALSE &&
+           written == size;
 }
 
 }  // namespace
@@ -47,22 +58,29 @@ std::wstring AppPaths::DataFile(const wchar_t* name) {
 }
 
 bool AppPaths::WriteUtf8File(const std::wstring& path, const std::wstring& text) {
+    if (path.empty() || text.empty() ||
+        text.size() > static_cast<std::size_t>(INT_MAX)) {
+        return false;
+    }
     const int length = static_cast<int>(text.size());
-    if (path.empty() || length <= 0) return false;
 
     const int bytes = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), length, nullptr, 0, nullptr, nullptr);
     if (bytes <= 0) return false;
+    if (static_cast<unsigned int>(bytes) > MAXDWORD) return false;
+
     std::string utf8(static_cast<std::size_t>(bytes), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), length, utf8.data(), bytes, nullptr, nullptr);
+    if (WideCharToMultiByte(CP_UTF8, 0, text.c_str(), length, utf8.data(), bytes,
+                            nullptr, nullptr) != bytes) {
+        return false;
+    }
 
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
 
     const unsigned char bom[3] = { 0xEF, 0xBB, 0xBF };
-    DWORD written = 0;
-    bool ok = WriteFile(file, bom, sizeof(bom), &written, nullptr) != FALSE;
-    if (ok) ok = WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) != FALSE;
+    const bool ok = WriteExact(file, bom, sizeof(bom)) &&
+                    WriteExact(file, utf8.data(), static_cast<DWORD>(utf8.size()));
     CloseHandle(file);
     return ok;
 }

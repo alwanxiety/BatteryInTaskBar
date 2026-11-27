@@ -1514,6 +1514,12 @@ LRESULT Win11Menu::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (wParam == kTimerFrame) Tick();
         return 0;
 
+    case WM_CLOSE:
+        // Закрываем меню через обычную анимацию, чтобы Run() завершился
+        // штатно даже при системном Alt+F4/Close.
+        Dismiss();
+        return 0;
+
     case WM_DESTROY:
         m_hwnd = nullptr;
         return 0;

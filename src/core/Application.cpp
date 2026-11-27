@@ -52,8 +52,6 @@ bool Application::Run() {
 bool Application::Stop() {
     if (m_stopEvent) SetEvent(m_stopEvent);
 
-    bool clean = AirPodsMonitor::Instance().Stop();
-
     if (m_pollingThread) {
         // Поток опроса спит шагами по 100 мс и всегда завершается быстро.
         WaitForSingleObject(m_pollingThread, INFINITE);
@@ -67,8 +65,10 @@ bool Application::Stop() {
     }
 
     TelemetryCache::SaveFromState();
+    // Destroy сначала join'ит отчётный поток. Отчёт читает AirPodsMonitor,
+    // поэтому останавливать AirPods нужно только после разрушения окна.
     m_window.Destroy();
-    return clean;
+    return AirPodsMonitor::Instance().Stop();
 }
 
 DWORD WINAPI Application::StaticPollingThread(LPVOID param) {

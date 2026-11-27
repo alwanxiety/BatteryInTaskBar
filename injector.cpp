@@ -101,8 +101,13 @@ bool InjectDll(HANDLE hProc, const std::wstring& dllPath) {
     DWORD exitCode = 0;
     const bool finished = waitResult == WAIT_OBJECT_0 && GetExitCodeThread(hThread, &exitCode) != FALSE;
     CloseHandle(hThread);
-    VirtualFreeEx(hProc, pRemoteBuf, 0, MEM_RELEASE);
 
+    // При таймауте LoadLibraryW всё ещё может читать строку из удалённого
+    // процесса. Освобождать буфер в этот момент нельзя: это даст use-after-free
+    // в Explorer. Небольшая утечка в чужом процессе безопаснее падения.
+    if (waitResult != WAIT_OBJECT_0) return false;
+
+    VirtualFreeEx(hProc, pRemoteBuf, 0, MEM_RELEASE);
     return finished && exitCode != 0;
 }
 

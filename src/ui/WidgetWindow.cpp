@@ -1482,11 +1482,21 @@ void WidgetWindow::ShowDiagnosticsReport(HWND hwnd) {
     m_reportPath.clear();
     try {
         m_reportThread = std::thread([this, snapshot, hwnd] {
-            const std::wstring path = Report::Write(hwnd, snapshot);
-            {
-                m_reportPath = path;
-                m_reportDone.store(true, std::memory_order_release);
+            std::wstring path;
+            try {
+                path = Report::Write(hwnd, snapshot);
+            } catch (...) {
+                // Исключение не должно выходить из entry point std::thread:
+                // это вызвало бы std::terminate и уронило Explorer.
+                Diag::Log(L"diagnostics report: unhandled exception");
             }
+            try {
+                m_reportPath = path;
+            } catch (...) {
+                m_reportPath.clear();
+                Diag::Log(L"diagnostics report: could not store path");
+            }
+            m_reportDone.store(true, std::memory_order_release);
             PostMessageW(hwnd, WM_APP_REPORT_DONE, 0, 0);
         });
     } catch (...) {
